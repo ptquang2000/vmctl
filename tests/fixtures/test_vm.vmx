@@ -1,0 +1,10 @@
+.encoding = "UTF-8"
+# This is a comment
+displayName = "Test VM"
+guestOS = "windows9-64"
+memsize = "2048"
+numvcpus = "2"
+ethernet0.connectionType = "nat"
+ethernet0.present = "TRUE"
+nvme0:0.present = "TRUE"
+nvme0:0.fileName = "test.vmdk"

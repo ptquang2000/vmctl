@@ -1,0 +1,8 @@
+.encoding = "UTF-8"
+snapshot.lastUID = "2"
+snapshot.current = "2"
+snapshot0.uid = "1"
+snapshot0.displayName = "init"
+snapshot1.uid = "2"
+snapshot1.displayName = "with-tools"
+snapshot.numSnapshots = "2"

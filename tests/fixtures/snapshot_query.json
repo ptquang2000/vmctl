@@ -1,0 +1,8 @@
+{
+    "currentUID": 1,
+    "helperUID": 0,
+    "snapshots": [
+        {"displayName": "init", "parentUID": 0, "uid": 1},
+        {"displayName": "with-tools", "parentUID": 1, "uid": 2}
+    ]
+}
