@@ -216,6 +216,15 @@ def network_list(name):
         _err(str(e))
 
 
+@network.command("ip")
+@click.argument("name")
+def network_ip(name):
+    try:
+        _out(_vm(name).network.ip())
+    except (VMCtlError, ValueError) as e:
+        _err(str(e))
+
+
 @network.command("connect")
 @click.argument("name")
 @click.argument("label")
