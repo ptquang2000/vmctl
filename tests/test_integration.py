@@ -434,12 +434,11 @@ def test_snapshot_memory_resume(snapshot_vm):
     gone = _poll(lambda: _find_live_marked_pid(vm) is None, timeout_s=15)
     assert gone, f"killed process ({PING_MARKER!r}) still alive after kill"
 
-    # 5. Revert to the memory snapshot. Revert requires the VM off (vmctl
-    #    faithfully surfaces vmcli's "invalid state (online)" error), so stop
-    #    first; then start.
-    vm.power.stop(hard=True)
-    vm.snapshot.revert(LIVETEST_SNAPSHOT)
-    vm.power.start()
+    # 5. Revert to the memory snapshot. The library now owns the lifecycle: with
+    #    the VM running, revert(..., ensure_running=True) hard-stops it, reverts,
+    #    and starts it again in one call -- exercising the running-VM auto-stop
+    #    path and leaving the VM running (no manual stop/start here).
+    vm.snapshot.revert(LIVETEST_SNAPSHOT, ensure_running=True)
     _wait_for_tools(vm)
 
     # 6a. PID survival -- the hard, cold-boot-impossible assertion. The SAME pid

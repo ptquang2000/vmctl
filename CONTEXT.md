@@ -15,6 +15,76 @@ _Avoid_: "address" (vague — could read as MAC or adapter), "network IP"
 **Stale guest IP**:
 A *suspended* VM still answers `getGuestIPAddress` with its last-known IP (exit 0) — it does **not** error. So `network.ip()` on a suspended VM may return an address that is no longer valid after resume. Callers needing a guaranteed-live IP must confirm the VM is running first.
 
+## CLI VM selection (optional VM name)
+
+Every command that operates on a VM takes the VM **name** as its first positional
+argument. The name may be **omitted** to auto-select the single running VM:
+
+> **Omit the name; use a leading `--` only when other positionals follow**, so the
+> first remaining token isn't mistaken for the name.
+
+| Command shape | Explicit | Auto-select single running VM |
+|---|---|---|
+| Name-only (`power state`, `network ip`, `tools query`, …) | `power state myvm` | `power state` (bare) |
+| Extra positionals (`snapshot take`, `guest copy-to`, …) | `snapshot take myvm s1` | `snapshot take -- s1` |
+| Variadic (`guest run`) | `guest run myvm cmd.exe /c echo hi` | `guest run -- cmd.exe /c echo hi` |
+
+Rules and rationale:
+
+- **Trigger = exactly one *running* VM in scope** — counted from `vmrun list`
+  intersected with the registry (scan roots). Out-of-scope running VMs are
+  ignored for both the count and selection (they can't be named via vmctl
+  anyway). So the resolved VM always has a name + credentials.
+- **Targets that are off by nature can't auto-select.** Because the trigger is a
+  *running* VM, `power start`, `clone`, and offline `snapshot revert` rarely
+  match — intended, not a bug.
+- **Scope = all VM-operating commands except `vm list` (no name) and
+  `auth set`** (a config write keyed by name, not an op on a live VM).
+- **The leading `--` is a custom marker, not Click's option terminator.** Click
+  natively consumes `--` and shifts nothing, so the CLI intercepts it: if the
+  first token after the subcommand is `--`, it is stripped, the VM is
+  auto-resolved, and the rest is handed to Click. Only the *leading* `--` is
+  special, so later flags still parse (`snapshot take -- s1 --memory` → `--memory`
+  is still a flag). A `--` anywhere but first keeps its conventional meaning.
+- **No silent count-based fill.** `snapshot take myvm` (forgetting the snap name)
+  is a clean "missing argument" error — `myvm` is the name, never reinterpreted
+  as the snap name. Count-based omission and its wrong-VM footgun were
+  deliberately rejected.
+- **Every result carries a `vm` key** — typed or auto-selected — for a uniform,
+  predictable output shape (`{"vm": "<name>", …}`). The name is the canonical
+  registry name. (Existing exact-match unit tests must be updated for this.)
+- **Reverse-mapping** a running `.vmx` back to its name (for credential lookup)
+  inverts the registry **case-insensitively / path-normalized**, since
+  `vmrun list` and `rglob` paths may differ.
+- **Failure modes:** zero running in scope → `no running VM to auto-select; pass
+  a name`; two or more → error listing them, `pass a name`.
+
+## snapshot revert lifecycle
+
+`snapshot revert` is a lifecycle macro, not a bare vmcli call, because vmcli
+`Snapshot Revert` **errors while the VM is "online"** (running/paused) but
+tolerates **off or suspended** (see `tests/INTEGRATION.md`). The name is always
+**resolved/validated first**, so a typo'd snapshot name never powers off the VM.
+
+**Library `SnapshotModule.revert(name)` — restores prior power state:**
+
+| Prior state | Action |
+|---|---|
+| Online (running/paused) | hard-stop → revert → start (ends running) |
+| Suspended | revert only (stays suspended) |
+| Off | revert only (stays off) |
+
+- **Hard stop, not soft.** Revert discards the running state anyway, so a
+  graceful guest shutdown is wasted effort (and can hang without Tools).
+- This **overturns the earlier "library stays faithful to the must-be-off
+  constraint" rule** (project finding #15): the library now owns the
+  stop/revert/restore lifecycle. `revert(name, ensure_running=True)` forces a
+  start regardless of prior state (used by the CLI below).
+
+**CLI `vmctl snapshot revert` — always ends running:** after the revert it
+ensures the VM is started regardless of prior state (suspended → resume, off →
+cold boot). Implemented via `revert(..., ensure_running=True)`.
+
 ## Flagged ambiguities
 
 **"query" does not imply vmcli.** The earlier shorthand "queries go through vmcli, mutations through vmrun" is wrong as a general rule. The actual convention is:

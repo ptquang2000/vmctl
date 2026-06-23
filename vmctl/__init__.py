@@ -26,7 +26,7 @@ class VM:
         self.vmx_path = vmx_path
         self._runner = runner
         self.power = PowerModule(vmx_path, runner)
-        self.snapshot = SnapshotModule(vmx_path, runner)
+        self.snapshot = SnapshotModule(vmx_path, runner, self.power)
         self.network = NetworkModule(vmx_path, runner)
         self.peripheral = PeripheralModule(vmx_path, runner)
         self.guest = GuestModule(vmx_path, runner, credentials)
@@ -61,17 +61,51 @@ class VMCtl:
 
     def get(self, name: str) -> VM:
         vmx_path = self._registry.find(name)
-        credentials = self._config.get("credentials", {}).get(name.lower(), {})
-        return VM(name, vmx_path, self._runner, credentials)
+        # Resolve to the canonical registry name so the VM (and the CLI's `vm`
+        # output key) carry one stable identity regardless of how the caller
+        # spelled or abbreviated the name.
+        canonical = self._registry.name_for_path(vmx_path) or name
+        credentials = self._config.get("credentials", {}).get(canonical.lower(), {})
+        return VM(canonical, vmx_path, self._runner, credentials)
 
-    def list_vms(self) -> dict:
+    def resolve(self, name) -> VM:
+        """Return the requested VM, or the single running in-scope VM when name
+        is omitted (``None``)."""
+        if name is None:
+            return self._auto_select()
+        return self.get(name)
+
+    def _running_paths(self) -> list:
         raw = self._runner.run_vmrun("list")
-        running = []
+        paths = []
         for line in raw.splitlines():
             line = line.strip()
             if line and not line.startswith("Total running VMs:"):
-                running.append(line)
-        return {"running": running, "discovered": self._registry.list_all()}
+                paths.append(line)
+        return paths
+
+    def _running_in_scope(self) -> list:
+        """Canonical names of VMs that are both running and in the registry."""
+        names = []
+        for path in self._running_paths():
+            name = self._registry.name_for_path(path)
+            if name is not None:
+                names.append(name)
+        return names
+
+    def _auto_select(self) -> VM:
+        running = self._running_in_scope()
+        if not running:
+            raise ValueError("no running VM to auto-select; pass a name")
+        if len(running) > 1:
+            candidates = ", ".join(sorted(running))
+            raise ValueError(
+                f"multiple running VMs ({candidates}); pass a name"
+            )
+        return self.get(running[0])
+
+    def list_vms(self) -> dict:
+        return {"running": self._running_paths(), "discovered": self._registry.list_all()}
 
     def clone(self, name: str, dest: str, linked: bool = False) -> dict:
         vmx_path = self._registry.find(name)

@@ -1,5 +1,16 @@
+import os
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
+
+
+def _normalize_path(path: str) -> str:
+    """Case- and separator-insensitive key for comparing two .vmx paths.
+
+    ``vmrun list`` and the registry's ``rglob`` can report the same file with
+    different casing or separators (and short vs long forms), so reverse-mapping
+    a running path back to a registry name needs a normalized comparison.
+    """
+    return os.path.normcase(os.path.normpath(path))
 
 
 class VMRegistry:
@@ -23,6 +34,18 @@ class VMRegistry:
         if len(matches) > 1:
             raise ValueError(f"Ambiguous VM name '{name}': matches {list(matches.keys())}")
         raise ValueError(f"VM '{name}' not found in scan roots")
+
+    def name_for_path(self, vmx_path: str) -> Optional[str]:
+        """Reverse-map a .vmx path to its registry name, or None if not in scope.
+
+        Matches case-insensitively / path-normalized, so a running VM reported by
+        ``vmrun list`` resolves to the canonical registry name (and credentials).
+        """
+        target = _normalize_path(vmx_path)
+        for name, path in self._map.items():
+            if _normalize_path(path) == target:
+                return name
+        return None
 
     def list_all(self) -> Dict[str, str]:
         return dict(self._map)

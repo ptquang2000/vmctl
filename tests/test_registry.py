@@ -65,3 +65,25 @@ def test_nested_vmx(tmp_path):
     (sub / "DeepVM.vmx").write_text("x = 1")
     reg = VMRegistry([str(tmp_path)])
     assert reg.find("deepvm").endswith("DeepVM.vmx")
+
+
+def test_name_for_path_round_trips(tmp_path):
+    make_vmx_tree(tmp_path, ["Windows-10-x64"])
+    reg = VMRegistry([str(tmp_path)])
+    path = str(tmp_path / "Windows-10-x64.vmx")
+    assert reg.name_for_path(path) == "windows-10-x64"
+
+
+def test_name_for_path_case_and_separator_insensitive(tmp_path):
+    make_vmx_tree(tmp_path, ["Windows-10-x64"])
+    reg = VMRegistry([str(tmp_path)])
+    path = str(tmp_path / "Windows-10-x64.vmx")
+    # vmrun list can report a different casing / separator than rglob stored.
+    assert reg.name_for_path(path.upper()) == "windows-10-x64"
+    assert reg.name_for_path(path.replace("\\", "/")) == "windows-10-x64"
+
+
+def test_name_for_path_out_of_scope(tmp_path):
+    make_vmx_tree(tmp_path, ["Windows-10-x64"])
+    reg = VMRegistry([str(tmp_path)])
+    assert reg.name_for_path(r"C:\elsewhere\Other.vmx") is None
