@@ -349,79 +349,28 @@ def peripheral_mount_iso(name, label, iso_path):
         _err(str(e))
 
 
-@peripheral.command("eject")
+@peripheral.command("connect")
 @click.argument("name", required=False)
-@click.argument("label")
-def peripheral_eject(name, label):
+@click.argument("device_id")
+def peripheral_connect(name, device_id):
+    """Connect the device with id DEVICE_ID (copy it from `peripheral list`).
+    The device type is resolved from the id; no type needs to be supplied."""
     try:
         vm = _resolve(name)
-        _out_vm(vm, vm.peripheral.eject(label))
+        _out_vm(vm, vm.peripheral.connect(device_id))
     except (VMCtlError, ValueError) as e:
         _err(str(e))
 
 
-@peripheral.command("connect-disk")
+@peripheral.command("disconnect")
 @click.argument("name", required=False)
-@click.argument("label")
-def peripheral_connect_disk(name, label):
+@click.argument("device_id")
+def peripheral_disconnect(name, device_id):
+    """Disconnect the device with id DEVICE_ID (copy it from `peripheral list`).
+    The device type is resolved from the id; no type needs to be supplied."""
     try:
         vm = _resolve(name)
-        _out_vm(vm, vm.peripheral.connect_disk(label))
-    except (VMCtlError, ValueError) as e:
-        _err(str(e))
-
-
-@peripheral.command("disconnect-disk")
-@click.argument("name", required=False)
-@click.argument("label")
-def peripheral_disconnect_disk(name, label):
-    try:
-        vm = _resolve(name)
-        _out_vm(vm, vm.peripheral.disconnect_disk(label))
-    except (VMCtlError, ValueError) as e:
-        _err(str(e))
-
-
-@peripheral.command("connect-usb")
-@click.argument("name", required=False)
-@click.argument("device_name")
-def peripheral_connect_usb(name, device_name):
-    try:
-        vm = _resolve(name)
-        _out_vm(vm, vm.peripheral.connect_usb(device_name))
-    except (VMCtlError, ValueError) as e:
-        _err(str(e))
-
-
-@peripheral.command("disconnect-usb")
-@click.argument("name", required=False)
-@click.argument("device_name")
-def peripheral_disconnect_usb(name, device_name):
-    try:
-        vm = _resolve(name)
-        _out_vm(vm, vm.peripheral.disconnect_usb(device_name))
-    except (VMCtlError, ValueError) as e:
-        _err(str(e))
-
-
-@peripheral.command("connect-serial")
-@click.argument("name", required=False)
-@click.argument("label")
-def peripheral_connect_serial(name, label):
-    try:
-        vm = _resolve(name)
-        _out_vm(vm, vm.peripheral.connect_serial(label))
-    except (VMCtlError, ValueError) as e:
-        _err(str(e))
-
-
-@peripheral.command("disconnect-serial")
-@click.argument("name", required=False)
-@click.argument("label")
-def peripheral_disconnect_serial(name, label):
-    try:
-        vm = _resolve(name)
-        _out_vm(vm, vm.peripheral.disconnect_serial(label))
+        _out_vm(vm, vm.peripheral.disconnect(device_id))
     except (VMCtlError, ValueError) as e:
         _err(str(e))
 

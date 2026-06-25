@@ -254,6 +254,48 @@ def test_push_leading_dashdash_auto_selects(sync_run):
     assert rec.calls == [("push", "./build", r"C:\app")]
 
 
+# --------------------------------------------------------------------------- #
+# peripheral (unified connect/disconnect; removed verbs absent)               #
+# --------------------------------------------------------------------------- #
+
+
+def test_peripheral_connect_binds_id_and_injects_vm(run):
+    result, payload = run(["peripheral", "connect", "myvm", "sata0:1"])
+    assert result.exit_code == 0
+    assert payload["vm"] == "myvm"
+    assert payload["called"] == "connect"
+    assert payload["args"] == ["sata0:1"]
+
+
+def test_peripheral_disconnect_auto_selects(run):
+    result, payload = run(["peripheral", "disconnect", "--", "usb_xhci:4"], running=("box",))
+    assert result.exit_code == 0
+    assert payload["vm"] == "box"
+    assert payload["called"] == "disconnect"
+    assert payload["args"] == ["usb_xhci:4"]
+
+
+def test_peripheral_list_and_mount_iso_survive(run):
+    result, payload = run(["peripheral", "list", "myvm"])
+    assert result.exit_code == 0
+    assert payload["called"] == "list"
+
+    result, payload = run(["peripheral", "mount-iso", "myvm", "sata0:1", r"C:\foo.iso"])
+    assert result.exit_code == 0
+    assert payload["called"] == "mount_iso"
+    assert payload["args"] == ["sata0:1", r"C:\foo.iso"]
+
+
+@pytest.mark.parametrize(
+    "removed",
+    ["eject", "connect-disk", "disconnect-disk", "connect-usb",
+     "disconnect-usb", "connect-serial", "disconnect-serial"],
+)
+def test_removed_peripheral_commands_are_gone(run, removed):
+    result, _ = run(["peripheral", removed, "myvm", "x"])
+    assert result.exit_code != 0  # no such command
+
+
 def test_clone_adds_vm_key_and_uses_canonical_name(run, monkeypatch):
     captured = {}
 

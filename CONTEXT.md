@@ -208,6 +208,83 @@ So a `dest` that works for `push` (a directory) is rejected by `copy-to`, and a
 file too big for `copy-to` is exactly what `push` is for. Command help strings
 cross-reference each other.
 
+## peripheral devices (unified connect/disconnect)
+
+`peripheral` was 9 verbs (`connect-disk`/`disconnect-disk`/`connect-serial`/
+`disconnect-serial`/`connect-usb`/`disconnect-usb`/`eject`/`mount-iso`/`list`).
+It is now **4**: `list`, `connect`, `disconnect`, `mount-iso` (see
+[docs/adr/0004](docs/adr/0004-unified-peripheral-connect-via-list.md)).
+
+**Device id**:
+The *native* identifier of a connectable device, exactly as VMware names it — the
+**vmcli label** for disks/serial (`sata0:1`, `nvme0:0`, `serial0`) and the
+**named-device string** for USB. The id you see in `list` is the id you type into
+`connect`/`disconnect`. There is **no synthesized/friendly id** layered on top.
+_Avoid_: "device name" alone (ambiguous between the vmcli label and the USB
+named-device string).
+
+**Device type**:
+One of `disk`, `cdrom`, `serial`, `usb`. Derived, not typed by the user:
+`cdrom` vs `disk` comes from the backing (`cdrom_image` ⇒ `cdrom`). `type` is
+what `connect`/`disconnect` dispatch on, and what tells you a device is a `cdrom`
+(the only type `mount-iso` targets).
+
+### `list` is the contract backbone
+
+`peripheral.list()` returns a **flat, uniform** inventory — one schema per device:
+
+```
+{"vm": "<name>", "devices": [
+  {"id": "sata0:1", "type": "cdrom",  "connected": true,  "backing": "foo.iso"},
+  {"id": "serial0", "type": "serial", "connected": false, "backing": ...},
+  {"id": "<usb name>", "type": "usb", "connected": true,  "backing": ...}
+]}
+```
+
+This replaces the old grouped `{"disks", "serial"}` (which omitted USB entirely).
+Disks/serial come from `vmcli Disk query` / `Serial Query`; **USB entries come
+from the `.vmx` named-device config** — there is **no vmcli/vmrun verb that
+enumerates connectable *host* hardware**, so "available devices from host" means
+"devices the VM knows about and can connect," not a live host-USB probe.
+
+> ⚠️ **Verify live at implementation:** the exact `.vmx` key(s) and the precise
+> name string that `vmrun connectNamedDevice` accepts for a USB device, and
+> whether a USB device's `connected` state is readable from the `.vmx`. These are
+> the only pieces not confirmable from the tools' help alone.
+
+### connect/disconnect resolve id → type via `list`
+
+`connect(id)`/`disconnect(id)` call `self.list()`, find the entry whose `id`
+exactly matches, read its `type`, and dispatch to a private helper. The user sees
+**one id namespace**; the per-type backend split is hidden.
+
+- **Zero matches** → actionable error listing the valid ids.
+- **Id collides across types** → **hard error** asking to disambiguate (no
+  priority order baked in). Collision is near-impossible given the distinct
+  native namespaces, but the resolver must not silently pick one.
+- Resolution + dispatch + error modes live in the **library** (`PeripheralModule`),
+  not the CLI, so they are unit-testable without Click. The old public typed
+  methods (`connect_disk`, `connect_usb`, …) are **removed** in favour of private
+  `_connect_disk`/`_connect_serial`/`_connect_usb` helpers.
+
+### Backend stays split (dispatch by type)
+
+| type | backend | id |
+|---|---|---|
+| disk / serial / cdrom | `vmcli ... ConnectionControl <label> connect|disconnect` | vmcli label |
+| usb | `vmrun connectNamedDevice` / `disconnectNamedDevice <name>` | named-device string |
+
+`vmrun connectNamedDevice` is **not** USB-specific — it connects any named VMX
+device — so converging *all* dispatch onto it is tempting. We **kept the split**:
+vmcli supplies the `connected` state `list` depends on and likely works while the
+VM is off, whereas `connectNamedDevice` typically needs the VM running.
+Collapsing onto `connectNamedDevice` is a **logged follow-up to verify live**, not
+part of this change.
+
+`mount-iso <id> <iso>` is kept separate because it rebinds the device **backing**
+(sets the ISO path) and *then* connects — something plain `connect` cannot do.
+`eject` was dropped: it was exactly `disconnect <cdrom-id>`.
+
 ## Example dialogue
 
 > **Dev:** The `network` command already lists the NIC — why add `ip`?
