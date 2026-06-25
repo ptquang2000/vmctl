@@ -83,7 +83,10 @@ Rules and rationale:
 - **Trigger = exactly one *running* VM in scope** — counted from `vmrun list`
   intersected with the registry (scan roots). Out-of-scope running VMs are
   ignored for both the count and selection (they can't be named via vmctl
-  anyway). So the resolved VM always has a name + credentials.
+  anyway). So the resolved VM always has a **name** — but *not* necessarily
+  registered credentials: auto-select guarantees identity, not that
+  `auth set` was ever run for that VM. Credential-dependent commands (e.g.
+  `sync`/`push`) must tolerate an empty cred dict (see **File sync via sss**).
 - **Targets that are off by nature can't auto-select.** Because the trigger is a
   *running* VM, `power start`, `clone`, and offline `snapshot revert` rarely
   match — intended, not a bug.
@@ -107,6 +110,28 @@ Rules and rationale:
   `vmrun list` and `rglob` paths may differ.
 - **Failure modes:** zero running in scope → `no running VM to auto-select; pass
   a name`; two or more → error listing them, `pass a name`.
+
+## CLI short forms — option flags & command prefixes (ADR-0005)
+
+The CLI is no longer long-form-only. Two independent short-form mechanisms:
+
+- **Short option flags are command-scoped mnemonics, not a global letter map.**
+  Click resolves short flags per command, so the only rule is within-command
+  uniqueness. Each option takes the clearest *local* mnemonic, preferring Unix
+  convention (`fs mkdir -p` = `--parents`, `fs rmdir -r` = `--recursive`). The
+  same letter therefore varies by command — `-d` is `--description`
+  (`snapshot take`), `--dir` (`fs mktemp`), `--project-dir` (`sync`); `-p` is
+  `--password` (`auth`/`sync`/`push`) but `--parents` (`fs mkdir`) and
+  `--prefix` (`fs mktemp`). **Per-command `--help` is the source of truth** —
+  short flags are deliberately *not* portable across commands. The only soft
+  convention: where a command takes credentials, `-u`/`-p` = user/password.
+- **Every command gets a short form via unambiguous-prefix resolution**
+  (`AliasedGroup`): any prefix matching exactly one command resolves to it
+  (`po stat` → `power state`, `sn ta` → `snapshot take`, `per conn` →
+  `peripheral connect`); a prefix matching more than one is a **hard error**
+  listing candidates (`po sta` → start, state); no match → normal "no such
+  command". Long names stay canonical for help/docs/completion. `VMGroup`
+  extends `AliasedGroup`, so prefixes compose with the leading-`--` marker.
 
 ## snapshot revert lifecycle
 
@@ -236,10 +261,36 @@ and **`vmctl push`** only (the full sss verb set is not mirrored):
 just-booted VM has no lease yet — see **Guest IP** / **Stale guest IP** above).
 This deliberately does **not** follow the `snapshot revert` lifecycle-ownership
 precedent (it does not wait or boot) — the caller readies the guest.
-Credentials come from `~/.vmctl/config.json`; if absent, `user`/`password` are
-`None` and sss attempts publickey/agent auth. The `import sss` is **lazy** (VM
-commands work without sss/paramiko installed) and `SssError` is wrapped as
-`VMCtlError` so the CLI surface stays uniform.
+The `import sss` is **lazy** (VM commands work without sss/paramiko installed)
+and `SssError` is wrapped as `VMCtlError` so the CLI surface stays uniform.
+
+**Credential resolution (stored, with an optional inline override).** By default
+both commands reuse the VM's stored guest credentials from
+`~/.vmctl/config.json` as the SSH login. `sync` and `push` also accept an inline
+override — `-u`/`--user` and `-p`/`--password` — governed by a **both-or-neither**
+rule: pass *both* and the pair **fully replaces** the stored creds for that run;
+pass *neither* and the stored creds are used; passing exactly one is a clean
+`VMCtlError` ("provide both `--user` and `--password`, or neither"). There is **no
+field-mixing** (CLI user + stored password). The override is **runtime-only and
+never persisted** — `auth set` remains the sole writer of the config.
+
+If no usable credentials resolve (none stored, none passed), `user`/`password`
+stay `None` and sss still attempts **publickey/agent** auth — keyless auth into
+the guest is preserved, *not* blocked by a hard preflight. But a password-less
+`Authentication failed` from sss is **caught and re-wrapped** with an actionable
+hint (register creds via `auth set`, or pass `--user`/`--password`), replacing the
+opaque `SSH connection to None@<ip> failed` message.
+
+Resolution, the both-or-neither check, and the catch-and-rewrap all live in
+**`SyncModule`** (the CLI just declares the options and passes them down), so they
+are unit-testable without Click or a real sss — per the library-owns-logic
+convention used by `peripheral`.
+
+> Short flags `-u`/`-p` here are command-scoped (user/password). The repo-wide
+> short-form convention this change originally deferred has since been taken on —
+> per-command mnemonic flags plus unambiguous command-prefix resolution; see
+> **CLI short forms** above and **ADR-0005**. The collision worry (`-p`/`-d`/`-o`
+> reused across commands) is moot because Click scopes short flags per command.
 
 ### Two file-into-guest paths (do not confuse them)
 

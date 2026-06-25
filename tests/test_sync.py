@@ -104,6 +104,70 @@ def test_run_no_credentials_passes_none(fake_sss):
     assert kwargs["password"] is None
 
 
+def test_run_override_replaces_stored_credentials(fake_sss):
+    # Both flags -> the CLI pair fully replaces stored creds for this run.
+    mod = _make_module(state="on", ip="192.168.1.20",
+                       credentials={"user": "stored", "password": "old"})
+    fake = fake_sss["install"](_make_session())
+    mod.run(user="cli", password="new")
+    _, kwargs = fake.connect.call_args
+    assert kwargs["user"] == "cli"
+    assert kwargs["password"] == "new"
+
+
+@pytest.mark.parametrize("user, password", [("cli", None), (None, "new")])
+def test_run_partial_override_raises_before_connecting(fake_sss, user, password):
+    mod = _make_module(state="on", ip="192.168.1.20",
+                       credentials={"user": "stored", "password": "old"})
+    fake = fake_sss["install"](_make_session())
+    with pytest.raises(VMCtlError, match="both --user and --password"):
+        mod.run(user=user, password=password)
+    fake.connect.assert_not_called()
+
+
+def test_run_auth_failure_without_password_rewraps_with_hint(fake_sss):
+    # No creds stored, none passed -> a password-less auth failure is rewrapped.
+    mod = _make_module(state="on", ip="192.168.1.20", credentials=None)
+    fake = fake_sss["install"](_make_session())
+    fake.connect.side_effect = _FakeSssError(
+        "SSH connection to None@192.168.1.20 failed: Authentication failed."
+    )
+    with pytest.raises(VMCtlError, match="auth set") as exc:
+        mod.run()
+    assert "--user" in str(exc.value)
+
+
+def test_run_auth_failure_with_password_keeps_plain_wrapping(fake_sss):
+    # A password *was* supplied -> no hint rewrap, just the wrapped SssError.
+    mod = _make_module(state="on", ip="192.168.1.20",
+                       credentials={"user": "u", "password": "p"})
+    fake = fake_sss["install"](_make_session())
+    fake.connect.side_effect = _FakeSssError(
+        "SSH connection to u@192.168.1.20 failed: Authentication failed."
+    )
+    with pytest.raises(VMCtlError, match="Authentication failed") as exc:
+        mod.run()
+    assert "auth set" not in str(exc.value)
+
+
+def test_push_override_replaces_stored_credentials(fake_sss):
+    mod = _make_module(state="on", ip="10.1.2.3",
+                       credentials={"user": "stored", "password": "old"})
+    fake = fake_sss["install"](_make_session(path={"copied": 1}))
+    mod.push("./build", r"C:\app", user="cli", password="new")
+    _, kwargs = fake.connect.call_args
+    assert kwargs["user"] == "cli"
+    assert kwargs["password"] == "new"
+
+
+def test_push_partial_override_raises_before_connecting(fake_sss):
+    mod = _make_module(state="on", ip="10.1.2.3")
+    fake = fake_sss["install"](_make_session())
+    with pytest.raises(VMCtlError, match="both --user and --password"):
+        mod.push("./build", r"C:\app", user="cli")
+    fake.connect.assert_not_called()
+
+
 def test_run_forwards_sync_optional_and_project_dir(fake_sss):
     mod = _make_module()
     session = _make_session()

@@ -115,6 +115,7 @@ vmctl parse-vmx myvm
 # guest IP — sync never boots it). Build-config/arch come from the sss profile.
 vmctl sync myvm                          # full profile lifecycle
 vmctl sync                               # auto-select the single running VM
+vmctl sync myvm -u test -p test          # one-off credential override (not saved)
 vmctl push myvm ./build "C:\app"         # ad-hoc transfer (any size, dir dest)
 vmctl push -- ./build "C:\app"           # auto-select (leading -- before paths)
 ```
@@ -122,6 +123,12 @@ vmctl push -- ./build "C:\app"           # auto-select (leading -- before paths)
 Command groups: `vm`, `auth`, `power`, `snapshot`, `network`, `peripheral`,
 `guest`, `fs`, `tools`, `shares`, `mks`, `vars`, `clipboard`, plus the top-level
 `inspect`, `parse-vmx`, `sync`, and `push`.
+
+**Short forms (ADR-0005).** Options have short flags (`-m`/`--memory`,
+`-H`/`--hard`, `-p`/`--parents`, …) — they are per-command mnemonics, so the
+authority is each command's `--help`, not a global letter map. Commands also
+accept any **unambiguous prefix** (`vmctl po stat`, `vmctl sn ta`,
+`vmctl per conn`); an ambiguous prefix errors with the candidates.
 
 **Two file-into-guest paths — don't confuse them.** `guest copy-to` uses VMware
 Tools, takes a **file** destination, and is capped at ~60 KB; `push` uses

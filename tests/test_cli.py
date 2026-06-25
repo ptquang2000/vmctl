@@ -185,12 +185,14 @@ class SyncRecorder:
     def __init__(self):
         self.calls = []
 
-    def run(self, sync_optional=False, project_dir=None, log=None):
-        self.calls.append(("run", sync_optional, project_dir))
+    def run(self, sync_optional=False, project_dir=None, log=None,
+            user=None, password=None):
+        self.calls.append(("run", sync_optional, project_dir, user, password))
         return {"synced": True}
 
-    def push(self, source, dest, project_dir=None, log=None):
-        self.calls.append(("push", source, dest))
+    def push(self, source, dest, project_dir=None, log=None,
+             user=None, password=None):
+        self.calls.append(("push", source, dest, user, password))
         return {"pushed": True}
 
 
@@ -229,14 +231,14 @@ def test_sync_explicit_name(sync_run):
     assert result.exit_code == 0
     assert payload["vm"] == "myvm"
     assert payload["synced"] is True
-    assert rec.calls == [("run", True, None)]
+    assert rec.calls == [("run", True, None, None, None)]
 
 
 def test_sync_bare_auto_selects(sync_run):
     result, payload, rec = sync_run(["sync"], running=("box",))
     assert result.exit_code == 0
     assert payload["vm"] == "box"
-    assert rec.calls == [("run", False, None)]
+    assert rec.calls == [("run", False, None, None, None)]
 
 
 def test_push_explicit_name_binds_positionals(sync_run):
@@ -244,14 +246,28 @@ def test_push_explicit_name_binds_positionals(sync_run):
     assert result.exit_code == 0
     assert payload["vm"] == "myvm"
     assert payload["pushed"] is True
-    assert rec.calls == [("push", "./build", r"C:\app")]
+    assert rec.calls == [("push", "./build", r"C:\app", None, None)]
+
+
+def test_sync_passes_credential_override(sync_run):
+    result, _, rec = sync_run(
+        ["sync", "myvm", "--user", "cli", "--password", "new"])
+    assert result.exit_code == 0
+    assert rec.calls == [("run", False, None, "cli", "new")]
+
+
+def test_push_passes_credential_override(sync_run):
+    result, _, rec = sync_run(
+        ["push", "myvm", "./build", r"C:\app", "-u", "cli", "-p", "new"])
+    assert result.exit_code == 0
+    assert rec.calls == [("push", "./build", r"C:\app", "cli", "new")]
 
 
 def test_push_leading_dashdash_auto_selects(sync_run):
     result, payload, rec = sync_run(["push", "--", "./build", r"C:\app"], running=("box",))
     assert result.exit_code == 0
     assert payload["vm"] == "box"
-    assert rec.calls == [("push", "./build", r"C:\app")]
+    assert rec.calls == [("push", "./build", r"C:\app", None, None)]
 
 
 # --------------------------------------------------------------------------- #
@@ -294,6 +310,57 @@ def test_peripheral_list_and_mount_iso_survive(run):
 def test_removed_peripheral_commands_are_gone(run, removed):
     result, _ = run(["peripheral", removed, "myvm", "x"])
     assert result.exit_code != 0  # no such command
+
+
+# --------------------------------------------------------------------------- #
+# short option flags                                                          #
+# --------------------------------------------------------------------------- #
+
+
+def test_short_flag_is_flag_equivalent_to_long(run):
+    # -m is the short form of --memory on `snapshot take`.
+    result, payload = run(["snapshot", "take", "myvm", "s1", "-m"])
+    assert result.exit_code == 0
+    assert payload["kwargs"]["memory"] is True
+
+
+def test_short_flag_value_option(run):
+    # -d carries --description's value; -n is --max on a different command.
+    _, payload = run(["snapshot", "take", "myvm", "s1", "-d", "nightly"])
+    assert payload["kwargs"]["description"] == "nightly"
+    _, payload = run(["fs", "ls", "myvm", r"C:\\", "-n", "5"])
+    assert payload["kwargs"]["max"] == 5
+
+
+def test_mkdir_dash_p_is_parents_unix_convention(run):
+    # -p means --parents here (Unix `mkdir -p`), not password.
+    _, payload = run(["fs", "mkdir", "myvm", r"C:\\new", "-p"])
+    assert payload["kwargs"]["parents"] is True
+
+
+# --------------------------------------------------------------------------- #
+# command prefix resolution (unambiguous short forms)                         #
+# --------------------------------------------------------------------------- #
+
+
+def test_unambiguous_prefix_resolves_group_and_command(run):
+    # `po stat` -> `power state`; nested groups resolve too.
+    result, payload = run(["po", "stat", "myvm"])
+    assert result.exit_code == 0
+    assert payload["called"] == "state"
+
+
+def test_ambiguous_prefix_fails_with_candidates(run):
+    # `po sta` is ambiguous: start vs state.
+    result, _ = run(["po", "sta", "myvm"])
+    assert result.exit_code != 0
+    assert "Ambiguous" in result.output
+    assert "start" in result.output and "state" in result.output
+
+
+def test_unknown_command_still_errors(run):
+    result, _ = run(["po", "zzz", "myvm"])
+    assert result.exit_code != 0
 
 
 def test_clone_adds_vm_key_and_uses_canonical_name(run, monkeypatch):

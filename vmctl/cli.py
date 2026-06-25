@@ -52,11 +52,38 @@ class VMCommand(click.Command):
         return super().parse_args(ctx, args)
 
 
-class VMGroup(click.Group):
+class AliasedGroup(click.Group):
+    """A group whose subcommands also answer to any **unambiguous prefix** of
+    their name -- the short form of every command, for free and self-maintaining.
+
+    ``vmctl po sta`` -> ``power start``, ``vmctl sn ta`` -> ``snapshot take``.
+    An exact name always wins; a prefix matching more than one command is a hard
+    error listing the candidates (never a silent pick); no match defers to
+    Click's normal "no such command". This keeps long names canonical (help,
+    completion, docs) while giving terse invocation, instead of a hand-curated
+    alias table that must be kept collision-free by hand.
+    """
+
+    def get_command(self, ctx, cmd_name):
+        cmd = super().get_command(ctx, cmd_name)
+        if cmd is not None:
+            return cmd
+        matches = [n for n in self.list_commands(ctx) if n.startswith(cmd_name)]
+        if len(matches) == 1:
+            return super().get_command(ctx, matches[0])
+        if len(matches) > 1:
+            ctx.fail(
+                f"Ambiguous command {cmd_name!r}; matches: "
+                f"{', '.join(sorted(matches))}."
+            )
+        return None
+
+
+class VMGroup(AliasedGroup):
     command_class = VMCommand
 
 
-@click.group()
+@click.group(cls=AliasedGroup)
 def cli():
     pass
 
@@ -80,7 +107,7 @@ def vm_list():
 @vm.command("clone")
 @click.argument("name", required=False)
 @click.argument("dest")
-@click.option("--linked", is_flag=True)
+@click.option("-l", "--linked", is_flag=True)
 def vm_clone(name, dest, linked):
     try:
         ctl = _vmctl()
@@ -100,8 +127,8 @@ def auth():
 
 @auth.command("set")
 @click.argument("name")
-@click.option("--user", required=True)
-@click.option("--password", required=True)
+@click.option("-u", "--user", required=True)
+@click.option("-p", "--password", required=True)
 def auth_set(name, user, password):
     try:
         _vmctl().set_credentials(name, user, password)
@@ -120,7 +147,7 @@ def power():
 
 @power.command("start")
 @click.argument("name", required=False)
-@click.option("--paused", is_flag=True)
+@click.option("-P", "--paused", is_flag=True)
 def power_start(name, paused):
     try:
         vm = _resolve(name)
@@ -131,7 +158,7 @@ def power_start(name, paused):
 
 @power.command("stop")
 @click.argument("name", required=False)
-@click.option("--hard", is_flag=True)
+@click.option("-H", "--hard", is_flag=True)
 def power_stop(name, hard):
     try:
         vm = _resolve(name)
@@ -142,7 +169,7 @@ def power_stop(name, hard):
 
 @power.command("reset")
 @click.argument("name", required=False)
-@click.option("--hard", is_flag=True)
+@click.option("-H", "--hard", is_flag=True)
 def power_reset(name, hard):
     try:
         vm = _resolve(name)
@@ -212,8 +239,8 @@ def snapshot_list(name):
 @snapshot.command("take")
 @click.argument("name", required=False)
 @click.argument("snap_name")
-@click.option("--memory", is_flag=True)
-@click.option("--description", default=None)
+@click.option("-m", "--memory", is_flag=True)
+@click.option("-d", "--description", default=None)
 def snapshot_take(name, snap_name, memory, description):
     try:
         vm = _resolve(name)
@@ -236,7 +263,7 @@ def snapshot_revert(name, snap_name):
 @snapshot.command("delete")
 @click.argument("name", required=False)
 @click.argument("snap_name")
-@click.option("--delete-children", is_flag=True)
+@click.option("-c", "--delete-children", is_flag=True)
 def snapshot_delete(name, snap_name, delete_children):
     try:
         vm = _resolve(name)
@@ -422,7 +449,7 @@ def guest_kill(name, pid):
 @click.argument("name", required=False)
 @click.argument("host_path")
 @click.argument("guest_path")
-@click.option("--overwrite", is_flag=True)
+@click.option("-o", "--overwrite", is_flag=True)
 def guest_copy_to(name, host_path, guest_path, overwrite):
     try:
         vm = _resolve(name)
@@ -435,7 +462,7 @@ def guest_copy_to(name, host_path, guest_path, overwrite):
 @click.argument("name", required=False)
 @click.argument("guest_path")
 @click.argument("host_path")
-@click.option("--overwrite", is_flag=True)
+@click.option("-o", "--overwrite", is_flag=True)
 def guest_copy_from(name, guest_path, host_path, overwrite):
     try:
         vm = _resolve(name)
@@ -455,9 +482,9 @@ def fs():
 @fs.command("ls")
 @click.argument("name", required=False)
 @click.argument("path")
-@click.option("--regexp", default=None)
-@click.option("--max", "max_results", type=int, default=None)
-@click.option("--index", type=int, default=None)
+@click.option("-r", "--regexp", default=None)
+@click.option("-n", "--max", "max_results", type=int, default=None)
+@click.option("-i", "--index", type=int, default=None)
 def fs_ls(name, path, regexp, max_results, index):
     try:
         vm = _resolve(name)
@@ -479,7 +506,7 @@ def fs_env(name):
 @fs.command("mkdir")
 @click.argument("name", required=False)
 @click.argument("path")
-@click.option("--parents", is_flag=True)
+@click.option("-p", "--parents", is_flag=True)
 def fs_mkdir(name, path, parents):
     try:
         vm = _resolve(name)
@@ -502,7 +529,7 @@ def fs_rm(name, path):
 @fs.command("rmdir")
 @click.argument("name", required=False)
 @click.argument("path")
-@click.option("--recursive", is_flag=True)
+@click.option("-r", "--recursive", is_flag=True)
 def fs_rmdir(name, path, recursive):
     try:
         vm = _resolve(name)
@@ -515,7 +542,7 @@ def fs_rmdir(name, path, recursive):
 @click.argument("name", required=False)
 @click.argument("src")
 @click.argument("dst")
-@click.option("--overwrite", is_flag=True)
+@click.option("-o", "--overwrite", is_flag=True)
 def fs_mv(name, src, dst, overwrite):
     try:
         vm = _resolve(name)
@@ -528,7 +555,7 @@ def fs_mv(name, src, dst, overwrite):
 @click.argument("name", required=False)
 @click.argument("src")
 @click.argument("dst")
-@click.option("--overwrite", is_flag=True)
+@click.option("-o", "--overwrite", is_flag=True)
 def fs_mvdir(name, src, dst, overwrite):
     try:
         vm = _resolve(name)
@@ -539,10 +566,10 @@ def fs_mvdir(name, src, dst, overwrite):
 
 @fs.command("mktemp")
 @click.argument("name", required=False)
-@click.option("--dir", "as_dir", is_flag=True)
-@click.option("--prefix", default="vmctl_", show_default=True)
-@click.option("--suffix", default="")
-@click.option("--directory", default=None)
+@click.option("-d", "--dir", "as_dir", is_flag=True)
+@click.option("-p", "--prefix", default="vmctl_", show_default=True)
+@click.option("-s", "--suffix", default="")
+@click.option("-D", "--directory", default=None)
 def fs_mktemp(name, as_dir, prefix, suffix, directory):
     try:
         vm = _resolve(name)
@@ -574,8 +601,8 @@ def tools_query(name):
 
 @tools.command("install")
 @click.argument("name", required=False)
-@click.option("--iso-path", default=None)
-@click.option("--cmdline", default=None)
+@click.option("-i", "--iso-path", default=None)
+@click.option("-c", "--cmdline", default=None)
 def tools_install(name, iso_path, cmdline):
     try:
         vm = _resolve(name)
@@ -586,8 +613,8 @@ def tools_install(name, iso_path, cmdline):
 
 @tools.command("upgrade")
 @click.argument("name", required=False)
-@click.option("--iso-path", default=None)
-@click.option("--cmdline", default=None)
+@click.option("-i", "--iso-path", default=None)
+@click.option("-c", "--cmdline", default=None)
 def tools_upgrade(name, iso_path, cmdline):
     try:
         vm = _resolve(name)
@@ -617,8 +644,8 @@ def shares_list(name):
 @shares.command("add")
 @click.argument("name", required=False)
 @click.argument("host_path")
-@click.option("--writable", is_flag=True)
-@click.option("--guest-name", default=None)
+@click.option("-w", "--writable", is_flag=True)
+@click.option("-g", "--guest-name", default=None)
 def shares_add(name, host_path, writable, guest_name):
     """Add an HGFS share. Returns the assigned label (e.g. "sharedFolder0");
     pass that label to remove/set-* commands."""
@@ -851,12 +878,18 @@ def _log_stderr(msg: str) -> None:
 
 @cli.command("sync", cls=VMCommand)
 @click.argument("name", required=False)
-@click.option("--optional", is_flag=True,
+@click.option("-o", "--optional", is_flag=True,
               help="Include optional (sync_optional) mappings from the profile.")
-@click.option("--project-dir", default=None,
+@click.option("-d", "--project-dir", default=None,
               help="Project dir whose git remote selects the sss profile "
                    "(default: cwd).")
-def cmd_sync(name, optional, project_dir):
+@click.option("-u", "--user", default=None,
+              help="Override the SSH login user for this run (pass with "
+                   "--password, or neither; never persisted).")
+@click.option("-p", "--password", default=None,
+              help="Override the SSH login password for this run (pass with "
+                   "--user, or neither; never persisted).")
+def cmd_sync(name, optional, project_dir, user, password):
     """Sync this project into the running guest over SSH (full sss profile
     lifecycle). The VM must be running with a guest IP; sync never boots it.
     Build-config/arch come from the sss profile's variables, not flags. For an
@@ -866,6 +899,7 @@ def cmd_sync(name, optional, project_dir):
         vm = _resolve(name)
         _out_vm(vm, vm.sync.run(
             sync_optional=optional, project_dir=project_dir, log=_log_stderr,
+            user=user, password=password,
         ))
     except (VMCtlError, ValueError) as e:
         _err(str(e))
@@ -875,7 +909,13 @@ def cmd_sync(name, optional, project_dir):
 @click.argument("name", required=False)
 @click.argument("source")
 @click.argument("dest")
-def cmd_push(name, source, dest):
+@click.option("-u", "--user", default=None,
+              help="Override the SSH login user for this run (pass with "
+                   "--password, or neither; never persisted).")
+@click.option("-p", "--password", default=None,
+              help="Override the SSH login password for this run (pass with "
+                   "--user, or neither; never persisted).")
+def cmd_push(name, source, dest, user, password):
     """Copy SOURCE (file or directory, any size) into the running guest's remote
     directory DEST over SSH/SFTP. Unlike `guest copy-to` (VMware Tools, file
     dest, <=60 KB), `push` needs an SSH server in the guest, takes a directory
@@ -883,6 +923,7 @@ def cmd_push(name, source, dest):
     `vmctl push -- ./build C:\\app`."""
     try:
         vm = _resolve(name)
-        _out_vm(vm, vm.sync.push(source, dest, log=_log_stderr))
+        _out_vm(vm, vm.sync.push(source, dest, log=_log_stderr,
+                                 user=user, password=password))
     except (VMCtlError, ValueError) as e:
         _err(str(e))

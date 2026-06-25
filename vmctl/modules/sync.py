@@ -45,8 +45,26 @@ class SyncModule:
             )
         return ip
 
+    # -- credential resolution ----------------------------------------------
+
+    def _resolve_credentials(self, user, password):
+        """Resolve the SSH login for this run under the both-or-neither rule.
+
+        Both flags present -> the CLI pair fully replaces the stored creds for
+        this run (no field-mixing). Neither -> the VM's stored creds (current
+        behavior; may be empty, which keeps keyless publickey/agent auth open).
+        Exactly one -> an actionable error before any connect is attempted.
+        """
+        if (user is None) != (password is None):
+            raise VMCtlError(
+                "provide both --user and --password, or neither."
+            )
+        if user is not None:  # both present -> override
+            return user, password
+        return self._credentials.get("user"), self._credentials.get("password")
+
     def _connect(self, host: str, project_dir=None, profile=None,
-                 base_dir=None, log=None):
+                 base_dir=None, log=None, user=None, password=None):
         # Lazy import so vmctl's VM commands work without sss/paramiko installed;
         # only sync/push need it. Wrap sss's error type so vmctl's CLI surface
         # stays uniform (its handlers catch VMCtlError/ValueError).
@@ -57,31 +75,51 @@ class SyncModule:
                 "sss is not installed; sync/push require it "
                 "(`pip install -e ./sss` from the vmctl repo root)."
             ) from e
-        return sss, sss.connect(
-            host=host,
-            user=self._credentials.get("user"),
-            password=self._credentials.get("password"),
-            project_dir=project_dir,
-            profile=profile,
-            base_dir=base_dir,
-            log=log,
-        )
+        user, password = self._resolve_credentials(user, password)
+        # sss.connect opens the SSH connection eagerly (auth happens here), so a
+        # bad/absent login surfaces now. Rewrap a password-less auth failure to
+        # name the real fix instead of the opaque `None@<ip> ... failed` message;
+        # keyless auth that succeeds is untouched, other SssErrors keep wrapping.
+        try:
+            session = sss.connect(
+                host=host,
+                user=user,
+                password=password,
+                project_dir=project_dir,
+                profile=profile,
+                base_dir=base_dir,
+                log=log,
+            )
+        except sss.SssError as e:
+            if password is None and "Authentication failed" in str(e):
+                raise VMCtlError(
+                    f"SSH authentication to {host} failed and no credentials "
+                    "were available. Register them with `vmctl auth set`, or "
+                    "pass --user and --password to this command."
+                ) from e
+            raise VMCtlError(str(e)) from e
+        return sss, session
 
     # -- operations ---------------------------------------------------------
 
     def run(self, sync_optional: bool = False, project_dir=None,
-            profile=None, base_dir=None, log=None) -> dict:
+            profile=None, base_dir=None, log=None,
+            user=None, password=None) -> dict:
         """Full profile lifecycle (pre_sync -> sync -> post_sync) into the guest.
 
         The profile is auto-selected by ``project_dir``'s git remote (the
         ``profile``/``base_dir`` kwargs are an explicit-injection seam used by
         tests). Build-config/arch substitution comes from the profile's own
         ``variables`` in ``~/.sss/config.json`` -- vmctl passes no extra vars.
+
+        ``user``/``password`` are an optional inline credential override (the
+        both-or-neither rule lives in ``_connect``); they are runtime-only and
+        never persisted.
         """
         host = self._resolve_host()
         sss, session = self._connect(
             host, project_dir=project_dir, profile=profile,
-            base_dir=base_dir, log=log,
+            base_dir=base_dir, log=log, user=user, password=password,
         )
         try:
             with session as s:
@@ -94,10 +132,16 @@ class SyncModule:
         except sss.SssError as e:
             raise VMCtlError(str(e)) from e
 
-    def push(self, source: str, dest: str, project_dir=None, log=None) -> dict:
-        """Ad-hoc, profile-less transfer of ``source`` to remote dir ``dest``."""
+    def push(self, source: str, dest: str, project_dir=None, log=None,
+             user=None, password=None) -> dict:
+        """Ad-hoc, profile-less transfer of ``source`` to remote dir ``dest``.
+
+        ``user``/``password`` are the same optional inline credential override
+        as ``run`` (both-or-neither, runtime-only).
+        """
         host = self._resolve_host()
-        sss, session = self._connect(host, project_dir=project_dir, log=log)
+        sss, session = self._connect(host, project_dir=project_dir, log=log,
+                                     user=user, password=password)
         try:
             with session as s:
                 return s.sync.path(source, dest)
