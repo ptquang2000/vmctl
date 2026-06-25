@@ -22,13 +22,13 @@ def make_vmx_tree(tmp_path, names):
     return paths
 
 
-def make_ctl(tmp_path, names, running_paths):
-    reg = VMRegistry([str(tmp_path)])
+def make_ctl(tmp_path, names, running_paths, aliases=None, credentials=None):
+    reg = VMRegistry([str(tmp_path)], aliases or {})
     runner = MagicMock()
     listing = f"Total running VMs: {len(running_paths)}\n" + "\n".join(running_paths)
     runner.run_vmrun.return_value = listing
     ctl = VMCtl.__new__(VMCtl)
-    ctl._config = {"credentials": {}}
+    ctl._config = {"credentials": credentials or {}}
     ctl._registry = reg
     ctl._runner = runner
     return ctl
@@ -82,3 +82,38 @@ def test_auto_select_case_insensitive_reverse_map(tmp_path):
     ctl = make_ctl(tmp_path, ["Mixed-Case-VM"], running_paths=[paths["Mixed-Case-VM"].upper()])
     vm = ctl.resolve(None)
     assert vm.name == "mixed-case-vm"
+
+
+def test_alias_to_in_registry_keeps_real_name(tmp_path):
+    """Alias -> in-scope VM: the real registry name stays canonical (input-only).
+    The alias never leaks into the `vm` identity or the credential lookup."""
+    make_vmx_tree(tmp_path, ["windows-10-x64"])
+    ctl = make_ctl(
+        tmp_path,
+        ["windows-10-x64"],
+        running_paths=[],
+        aliases={"dev": "windows-10-x64"},
+        credentials={"windows-10-x64": {"user": "u", "password": "p"}},
+    )
+    vm = ctl.resolve("dev")
+    assert vm.name == "windows-10-x64"
+    assert vm.guest._creds == {"user": "u", "password": "p"}
+
+
+def test_alias_to_out_of_scope_path_makes_alias_canonical(tmp_path):
+    """Alias -> .vmx outside scan roots: name_for_path is None, so the alias
+    falls through as the canonical identity and keys credentials."""
+    out = tmp_path / "out"
+    out.mkdir()
+    vmx = out / "db.vmx"
+    vmx.write_text('displayName = "test"')
+    ctl = make_ctl(
+        tmp_path,
+        [],
+        running_paths=[],
+        aliases={"db": str(vmx)},
+        credentials={"db": {"user": "dbu", "password": "dbp"}},
+    )
+    vm = ctl.resolve("db")
+    assert vm.name == "db"
+    assert vm.guest._creds == {"user": "dbu", "password": "dbp"}

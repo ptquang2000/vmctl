@@ -87,3 +87,72 @@ def test_name_for_path_out_of_scope(tmp_path):
     make_vmx_tree(tmp_path, ["Windows-10-x64"])
     reg = VMRegistry([str(tmp_path)])
     assert reg.name_for_path(r"C:\elsewhere\Other.vmx") is None
+
+
+# --- Aliases ---------------------------------------------------------------
+
+
+def test_alias_to_stem(tmp_path):
+    make_vmx_tree(tmp_path, ["Windows-10-x64"])
+    reg = VMRegistry([str(tmp_path)], {"dev": "windows-10-x64"})
+    assert reg.find("dev").endswith("Windows-10-x64.vmx")
+
+
+def test_alias_to_in_scope_path(tmp_path):
+    paths = make_vmx_tree(tmp_path, ["Windows-10-x64"])
+    target = str(tmp_path / "Windows-10-x64.vmx")
+    reg = VMRegistry([str(tmp_path)], {"dev": target})
+    assert reg.find("dev") == target
+
+
+def test_alias_to_out_of_scope_path(tmp_path):
+    # An alias may point at a .vmx that discovery never scanned.
+    other = tmp_path / "out"
+    other.mkdir()
+    vmx = other / "db.vmx"
+    vmx.write_text('displayName = "test"')
+    reg = VMRegistry([], {"db": str(vmx)})
+    assert reg.find("db") == str(vmx)
+
+
+def test_alias_beats_substring(tmp_path):
+    make_vmx_tree(tmp_path, ["windows-10-x64", "build-server"])
+    # "build" would substring-match build-server, but the alias wins.
+    reg = VMRegistry([str(tmp_path)], {"build": "windows-10-x64"})
+    assert reg.find("build").endswith("windows-10-x64.vmx")
+
+
+def test_alias_beats_same_named_stem(tmp_path):
+    make_vmx_tree(tmp_path, ["dev", "windows-10-x64"])
+    # A stem named "dev" exists, but the alias "dev" redirects elsewhere.
+    reg = VMRegistry([str(tmp_path)], {"dev": "windows-10-x64"})
+    assert reg.find("dev").endswith("windows-10-x64.vmx")
+
+
+def test_alias_key_case_insensitive(tmp_path):
+    make_vmx_tree(tmp_path, ["Windows-10-x64"])
+    reg = VMRegistry([str(tmp_path)], {"Dev": "windows-10-x64"})
+    assert reg.find("DEV").endswith("Windows-10-x64.vmx")
+
+
+def test_alias_missing_path(tmp_path):
+    reg = VMRegistry([str(tmp_path)], {"db": r"D:\nope\db.vmx"})
+    with pytest.raises(ValueError, match="alias 'db' points to missing .vmx"):
+        reg.find("db")
+
+
+def test_alias_unresolvable_name(tmp_path):
+    make_vmx_tree(tmp_path, ["Windows-10-x64"])
+    reg = VMRegistry([str(tmp_path)], {"dev": "ghost"})
+    with pytest.raises(ValueError, match="alias 'dev' -> 'ghost': VM not found"):
+        reg.find("dev")
+
+
+def test_alias_no_recursion(tmp_path):
+    make_vmx_tree(tmp_path, ["Windows-10-x64"])
+    # "dev" -> "build" must NOT follow the "build" alias; it's treated as a stem.
+    reg = VMRegistry(
+        [str(tmp_path)], {"dev": "build", "build": "windows-10-x64"}
+    )
+    with pytest.raises(ValueError, match="alias 'dev' -> 'build': VM not found"):
+        reg.find("dev")

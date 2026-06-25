@@ -59,7 +59,9 @@ class VM:
 class VMCtl:
     def __init__(self):
         self._config = load_config()
-        self._registry = VMRegistry(self._config.get("scan_roots", []))
+        self._registry = VMRegistry(
+            self._config.get("scan_roots", []), self._config.get("aliases", {})
+        )
         self._runner = Runner(
             self._config.get("vmware_home", r"C:\Program Files\VMware\VMware Workstation")
         )

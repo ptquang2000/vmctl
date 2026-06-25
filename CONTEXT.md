@@ -15,6 +15,55 @@ _Avoid_: "address" (vague — could read as MAC or adapter), "network IP"
 **Stale guest IP**:
 A *suspended* VM still answers `getGuestIPAddress` with its last-known IP (exit 0) — it does **not** error. So `network.ip()` on a suspended VM may return an address that is no longer valid after resume. Callers needing a guaranteed-live IP must confirm the VM is running first.
 
+## Name aliases (config remapping)
+
+A VM can be referred to by a **remapped name** (an *alias*) defined in
+`~/.vmctl/config.json` under an `"aliases"` block, separate from the
+auto-discovered registry of `.vmx` stems:
+
+```jsonc
+{
+  "scan_roots": ["C:/Users/.../Virtual Machines"],
+  "aliases": {
+    "dev":   "windows-10-x64",          // -> a discovered VM (registry name)
+    "db":    "D:/VMs/db/db.vmx"          // -> a .vmx path (can be OUT of scope)
+  }
+}
+```
+
+**Alias**:
+A user-chosen handle that resolves to either a discovered VM's **name** or a
+direct **.vmx path**. The value is **sniffed**: path-shaped *and* the file
+exists ⇒ used as a path; otherwise ⇒ treated as a registry name and looked up
+through the normal stem resolution. Aliases are **edited by hand** in the config
+(like `scan_roots`); there is **no `vmctl alias` CLI verb**.
+_Avoid_: "rename" (the VM is not renamed; the alias is an additional input-side handle).
+
+**Resolution order** (in `VMRegistry.find()`): **exact alias** (case-insensitive)
+→ exact stem → unique substring → error. An alias therefore **always wins over a
+substring** and over a same-named stem — explicit config beats fuzzy discovery.
+
+**Aliases are input-only — the real VM name stays canonical.** Resolving via an
+alias does **not** change the `vm` output key or the credentials lookup key: both
+remain the real registry name (`name_for_path()` is unchanged). So
+`vmctl power state dev` returns `{"vm": "windows-10-x64", …}`, and credentials
+are keyed by `windows-10-x64`, not `dev`. The **one exception is intrinsic, not
+special-cased**: an alias to a `.vmx` path **outside the scan roots** has no
+registry name, so `name_for_path()` returns `None` and the alias falls through to
+become canonical via `get()`'s existing `or name` clause (credentials then keyed
+by the alias). Auto-select (the optional-name path below) never yields an alias —
+it reverse-maps a running `.vmx` and only knows real names.
+
+**One hop, no recursion.** An alias value is sniffed as a path *or* a stem,
+never as another alias — `dev → build → …` chains are not followed.
+
+**Broken-alias errors are distinct and name the alias** (raised as `ValueError`
+from `find()`, surfaced identically to other resolution errors since the CLI
+catches `(VMCtlError, ValueError)`):
+- path-shaped (ends `.vmx` or contains a separator) but missing ⇒
+  `alias 'dev' points to missing .vmx: <path>`
+- name-shaped but unresolvable ⇒ `alias 'dev' -> 'foo': VM not found`
+
 ## CLI VM selection (optional VM name)
 
 Every command that operates on a VM takes the VM **name** as its first positional

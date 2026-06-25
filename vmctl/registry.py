@@ -14,8 +14,12 @@ def _normalize_path(path: str) -> str:
 
 
 class VMRegistry:
-    def __init__(self, scan_roots: List[str]):
+    def __init__(self, scan_roots: List[str], aliases: Optional[Dict[str, str]] = None):
         self._map: Dict[str, str] = {}
+        # Aliases are keyed case-insensitively, like discovered stems.
+        self._aliases: Dict[str, str] = {
+            k.lower(): v for k, v in (aliases or {}).items()
+        }
         for root in scan_roots:
             root_path = Path(root)
             if not root_path.exists():
@@ -24,8 +28,27 @@ class VMRegistry:
                 name = vmx.stem.lower()
                 self._map[name] = str(vmx)
 
+    def _resolve_alias(self, alias: str, value: str) -> str:
+        """Resolve one alias value to a .vmx path -- one hop, never recursive.
+
+        A value is either path-shaped (a .vmx path, possibly out of scope) or
+        name-shaped (a registry stem); it is never another alias.
+        """
+        path_shaped = value.endswith(".vmx") or "/" in value or "\\" in value
+        if path_shaped:
+            if Path(value).exists():
+                return value
+            raise ValueError(f"alias '{alias}' points to missing .vmx: {value}")
+        key = value.lower()
+        if key in self._map:
+            return self._map[key]
+        raise ValueError(f"alias '{alias}' -> '{value}': VM not found")
+
     def find(self, name: str) -> str:
         key = name.lower()
+        # Explicit aliases win over fuzzy discovery (exact stem / substring).
+        if key in self._aliases:
+            return self._resolve_alias(name, self._aliases[key])
         if key in self._map:
             return self._map[key]
         matches = {k: v for k, v in self._map.items() if key in k}

@@ -7,6 +7,7 @@ _DEFAULTS = {
     "vmware_home": r"C:\Program Files\VMware\VMware Workstation",
     "scan_roots": [],
     "credentials": {},
+    "aliases": {},
 }
 
 
