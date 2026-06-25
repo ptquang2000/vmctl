@@ -7,7 +7,7 @@ name = "vmctl"
 version = "0.1.0"
 description = "VMware Workstation Python CLI wrapper"
 requires-python = ">=3.10"
-dependencies = ["click>=8.0"]
+dependencies = ["click>=8.0", "sss"]
 
 [project.scripts]
 vmctl = "vmctl.cli:cli"
@@ -15,3 +15,9 @@ vmctl = "vmctl.cli:cli"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["vmctl*"]
+
+[tool.pytest.ini_options]
+# Confine collection to vmctl's own tests; the bundled ./sss submodule ships its
+# own tests/ package (same name), which otherwise collides on collection.
+testpaths = ["tests"]
+norecursedirs = ["sss"]

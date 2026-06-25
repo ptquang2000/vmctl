@@ -890,3 +890,50 @@ def cmd_parse_vmx(name):
         _out_vm(vm, vm.inspect.parse_vmx())
     except (VMCtlError, ValueError) as e:
         _err(str(e))
+
+
+# ---------------------------------------------------------------------------
+# sync / push (file-sync into the running guest, via sss)
+# ---------------------------------------------------------------------------
+def _log_stderr(msg: str) -> None:
+    """Sync/push progress callback: progress on stderr, JSON result on stdout."""
+    click.echo(msg, err=True)
+
+
+@cli.command("sync", cls=VMCommand)
+@click.argument("name", required=False)
+@click.option("--optional", is_flag=True,
+              help="Include optional (sync_optional) mappings from the profile.")
+@click.option("--project-dir", default=None,
+              help="Project dir whose git remote selects the sss profile "
+                   "(default: cwd).")
+def cmd_sync(name, optional, project_dir):
+    """Sync this project into the running guest over SSH (full sss profile
+    lifecycle). The VM must be running with a guest IP; sync never boots it.
+    Build-config/arch come from the sss profile's variables, not flags. For an
+    ad-hoc one-off transfer use `vmctl push`; for tiny files over VMware Tools
+    use `vmctl guest copy-to`."""
+    try:
+        vm = _resolve(name)
+        _out_vm(vm, vm.sync.run(
+            sync_optional=optional, project_dir=project_dir, log=_log_stderr,
+        ))
+    except (VMCtlError, ValueError) as e:
+        _err(str(e))
+
+
+@cli.command("push", cls=VMCommand)
+@click.argument("name", required=False)
+@click.argument("source")
+@click.argument("dest")
+def cmd_push(name, source, dest):
+    """Copy SOURCE (file or directory, any size) into the running guest's remote
+    directory DEST over SSH/SFTP. Unlike `guest copy-to` (VMware Tools, file
+    dest, <=60 KB), `push` needs an SSH server in the guest, takes a directory
+    dest, and has no size limit. Auto-select with a leading `--`:
+    `vmctl push -- ./build C:\\app`."""
+    try:
+        vm = _resolve(name)
+        _out_vm(vm, vm.sync.push(source, dest, log=_log_stderr))
+    except (VMCtlError, ValueError) as e:
+        _err(str(e))

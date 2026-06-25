@@ -42,3 +42,45 @@ def test_ip_propagates_error_when_off():
     mod._r.run_vmrun.side_effect = VMCtlError("The virtual machine is not powered on")
     with pytest.raises(VMCtlError, match="not powered on"):
         mod.ip()
+
+
+def test_ip_falls_back_to_guestinfo_when_vix_says_tools_not_running():
+    # After a memory-snapshot resume the VIX channel reports "Tools not running"
+    # though Tools are up; ip() falls back to the host-side guestinfo.ip cache.
+    mod = make_module()
+
+    def fake(*args):
+        if args[0] == "getGuestIPAddress":
+            raise VMCtlError("Error: The VMware Tools are not running in the virtual machine")
+        if args[0] == "readVariable":  # readVariable <vmx> guestVar ip
+            assert args[1:] == ("fake.vmx", "guestVar", "ip")
+            return "192.168.157.161\n"
+        raise AssertionError(f"unexpected vmrun {args}")
+
+    mod._r.run_vmrun.side_effect = fake
+    assert mod.ip() == {"ip": "192.168.157.161"}
+
+
+def test_ip_reraises_when_fallback_also_empty():
+    # Tools-not-running AND no cached guestinfo.ip -> surface the original error.
+    mod = make_module()
+
+    def fake(*args):
+        if args[0] == "getGuestIPAddress":
+            raise VMCtlError("Error: The VMware Tools are not running in the virtual machine")
+        return "\n"  # readVariable: empty guestinfo.ip
+
+    mod._r.run_vmrun.side_effect = fake
+    with pytest.raises(VMCtlError, match="not running"):
+        mod.ip()
+
+
+def test_ip_does_not_fall_back_on_non_tools_error():
+    # A non-"tools not running" failure (e.g. powered off) must NOT trigger the
+    # guestinfo fallback -- readVariable is never called.
+    mod = make_module()
+    mod._r.run_vmrun.side_effect = VMCtlError("Error: ...not powered on")
+    with pytest.raises(VMCtlError, match="not powered on"):
+        mod.ip()
+    # only the getGuestIPAddress attempt, no readVariable fallback
+    assert mod._r.run_vmrun.call_count == 1

@@ -92,7 +92,7 @@ def test_revert_online_stops_reverts_starts():
     mod.revert("init")
     assert [c[0] for c in manager.mock_calls] == ["stop", "revert", "start"]
     mod._power.stop.assert_called_once_with(hard=True)
-    mod._power.start.assert_called_once_with()
+    mod._power.start.assert_called_once_with(gui=True)
     mod._r.run_vmcli_action.assert_called_once_with(
         "fake.vmx", "Snapshot", "Revert", "1"
     )
@@ -119,14 +119,14 @@ def test_revert_ensure_running_starts_off_vm_without_stop():
     mod = make_module(power_state="off")
     mod.revert("init", ensure_running=True)
     mod._power.stop.assert_not_called()
-    mod._power.start.assert_called_once_with()
+    mod._power.start.assert_called_once_with(gui=True)
 
 
 def test_revert_ensure_running_starts_suspended_vm_without_stop():
     mod = make_module(power_state="suspended")
     mod.revert("init", ensure_running=True)
     mod._power.stop.assert_not_called()
-    mod._power.start.assert_called_once_with()
+    mod._power.start.assert_called_once_with(gui=True)
 
 
 def test_revert_validates_name_before_powering_off():

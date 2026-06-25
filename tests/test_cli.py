@@ -174,6 +174,86 @@ def test_auth_set_without_name_is_usage_error(run):
 # --------------------------------------------------------------------------- #
 
 
+# --------------------------------------------------------------------------- #
+# sync / push (in scope; leading -- auto-select)                              #
+# --------------------------------------------------------------------------- #
+
+
+class SyncRecorder:
+    """Records run/push calls but drops the non-serializable ``log`` callback."""
+
+    def __init__(self):
+        self.calls = []
+
+    def run(self, sync_optional=False, project_dir=None, log=None):
+        self.calls.append(("run", sync_optional, project_dir))
+        return {"synced": True}
+
+    def push(self, source, dest, project_dir=None, log=None):
+        self.calls.append(("push", source, dest))
+        return {"pushed": True}
+
+
+class SyncVM(FakeVM):
+    def __init__(self, name, recorder):
+        super().__init__(name)
+        self._rec = recorder
+
+    @property
+    def sync(self):
+        return self._rec
+
+
+@pytest.fixture
+def sync_run(monkeypatch):
+    rec = SyncRecorder()
+
+    def _run(args, running=("box",)):
+        class Ctl(FakeCtl):
+            def resolve(self, name):
+                vm = super().resolve(name)
+                return SyncVM(vm.name, rec)
+
+        monkeypatch.setattr(cli_mod, "VMCtl", lambda: Ctl(running))
+        result = CliRunner().invoke(cli, args)
+        try:
+            payload = json.loads(result.output)
+        except (json.JSONDecodeError, ValueError):
+            payload = None
+        return result, payload, rec
+    return _run
+
+
+def test_sync_explicit_name(sync_run):
+    result, payload, rec = sync_run(["sync", "myvm", "--optional"])
+    assert result.exit_code == 0
+    assert payload["vm"] == "myvm"
+    assert payload["synced"] is True
+    assert rec.calls == [("run", True, None)]
+
+
+def test_sync_bare_auto_selects(sync_run):
+    result, payload, rec = sync_run(["sync"], running=("box",))
+    assert result.exit_code == 0
+    assert payload["vm"] == "box"
+    assert rec.calls == [("run", False, None)]
+
+
+def test_push_explicit_name_binds_positionals(sync_run):
+    result, payload, rec = sync_run(["push", "myvm", "./build", r"C:\app"])
+    assert result.exit_code == 0
+    assert payload["vm"] == "myvm"
+    assert payload["pushed"] is True
+    assert rec.calls == [("push", "./build", r"C:\app")]
+
+
+def test_push_leading_dashdash_auto_selects(sync_run):
+    result, payload, rec = sync_run(["push", "--", "./build", r"C:\app"], running=("box",))
+    assert result.exit_code == 0
+    assert payload["vm"] == "box"
+    assert rec.calls == [("push", "./build", r"C:\app")]
+
+
 def test_clone_adds_vm_key_and_uses_canonical_name(run, monkeypatch):
     captured = {}
 

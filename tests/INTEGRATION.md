@@ -1,7 +1,7 @@
 # Integration-test setup — `vmctl-unittest` + the `init` snapshot
 
-The live integration suite (`tests/test_integration.py`, 13 tests) drives a real
-VM through guest operations. It is gated by `VMCTL_INTEGRATION=1` and skipped
+The live integration suite (`tests/test_integration.py`) drives a real VM
+through guest operations. It is gated by `VMCTL_INTEGRATION=1` and skipped
 otherwise. To run it you need the throwaway VM **`vmctl-unittest`** with a
 snapshot named **`init`**.
 
@@ -67,6 +67,29 @@ VMware binaries live at `C:\Program Files\VMware\VMware Workstation\{vmcli,vmrun
    logged in when you take it.
 
 5. Power the VM off. Each fixture's `revert` requires the VM off/suspended first.
+
+## OpenSSH prerequisite for the sync/push tests
+
+The two sync tests (`test_sync_push_lands_file`,
+`test_sync_lifecycle_injected_profile`) transfer files **over SSH** via the `sss`
+library — a different channel from the Tools-based `guest copy-to`. They share
+the `guest_vm` boot (no extra cycle) but need an **OpenSSH server inside the
+`init` snapshot**, reachable as `test` / `test` on **port 22**. This is the same
+one-time-snapshot-update model as the Tools provisioning above.
+
+To add it before re-taking the `init` snapshot (step 4), from an elevated guest
+PowerShell:
+
+```
+Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
+Start-Service sshd
+Set-Service -Name sshd -StartupType Automatic
+```
+
+Confirm the host can reach it (`Test-NetConnection <guest-ip> -Port 22`), then
+take the `init` snapshot while logged in. Until the snapshot carries a reachable
+sshd, the two sync tests **skip** (they probe port 22 first) rather than fail, so
+the rest of the suite is unaffected.
 
 ## Running the suite
 

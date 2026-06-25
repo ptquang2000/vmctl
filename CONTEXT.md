@@ -111,6 +111,21 @@ Both *reads* and *writes* use `vmrun` when vmcli can't serve them:
 - `-wait` (block until an IP exists) is intentionally **not** exposed — it can hang indefinitely; callers poll instead.
 - `-snapshot=` is irrelevant to a live query and ignored.
 
+**Resume wedges the VIX channel — `ip()` falls back to `guestinfo.ip`.** After
+resuming a *suspended / memory snapshot*, `vmrun getGuestIPAddress` can fail with
+`Error: The VMware Tools are not running in the virtual machine` for the **entire
+resumed session**, even though Tools are fully up (vmcli `Tools Query` reports
+`running: true`, guest ops work) and the guest is networked. `getGuestIPAddress`
+gates on a VIX Tools **heartbeat** that the resume leaves wedged; only a guest
+**reboot** re-establishes it (restarting the in-guest Tools service does not).
+Because `getGuestIPAddress` is effectively `guestinfo.ip` **plus** that heartbeat
+gate, `ip()` catches the "not running" failure and falls back to
+`vmrun readVariable <vmx> guestVar ip` (host-side `guestinfo.ip`, no heartbeat
+gate, no guest creds). The fallback fires **only** on a "not running" message —
+"not powered on" still raises, so a genuinely-off VM is never masked. If the
+cached `guestinfo.ip` is also empty, the original error is re-raised. (Verified
+live against `vmctl-unittest`, 2026-06-25.)
+
 ## Guest file copy (`guest.copy_to` / `guest.copy_from`)
 
 `vmcli Guest copyTo/copyFrom` require `<toPath>` to be a full **file** path. Verified live
@@ -145,6 +160,53 @@ against `vmctl-unittest` (which now has Tools):
   GUI copy-paste to text/images <4 MB, not files between VMs. Do not re-investigate wiring
   it into vmctl. Note: the `clipboard` module (see `vmctl/modules/clipboard.py`) handles the
   **text clipboard** only — it is unrelated to host↔guest file paste.
+
+## File sync via sss (vmctl → sss)
+
+vmctl **depends on** `sss` (embedded as the `./sss` git submodule) and inherits
+file-sync by composition — the inverse of the original direction (see
+[docs/adr/0003](docs/adr/0003-depend-on-sss-for-file-sync.md) and sss's
+[ADR-0004](sss/docs/adr/0004-standalone-no-vm-coupling.md)). sss is
+target-agnostic and knows nothing about VMs; vmctl resolves the VM and feeds it a
+host + credentials.
+
+The seam is **`vm.sync`** (a `SyncModule`), surfaced on the CLI as **`vmctl sync`**
+and **`vmctl push`** only (the full sss verb set is not mirrored):
+
+- `vm.sync.run(sync_optional=False, project_dir=None)` — full profile lifecycle
+  (`pre_sync` → sync → `post_sync`). The profile auto-selects from
+  `project_dir`'s git remote in `~/.sss/config.json`. **Build-config/arch are not
+  vmctl flags** — `{build_cfg}`/`{arch}` substitution comes from the profile's own
+  `variables` block; `vmctl sync` exposes only `--optional` and `--project-dir`.
+  (`profile`/`base_dir` kwargs exist as a test-injection seam.)
+- `vm.sync.push(source, dest)` — ad-hoc, profile-less transfer.
+
+**The IP is read once; sync never boots the VM.** `SyncModule` requires
+`PowerState == "on"` and a non-empty `network.ip()`, else it raises an actionable
+`VMCtlError` (a suspended VM's IP is **stale**, a powered-off VM has none, and a
+just-booted VM has no lease yet — see **Guest IP** / **Stale guest IP** above).
+This deliberately does **not** follow the `snapshot revert` lifecycle-ownership
+precedent (it does not wait or boot) — the caller readies the guest.
+Credentials come from `~/.vmctl/config.json`; if absent, `user`/`password` are
+`None` and sss attempts publickey/agent auth. The `import sss` is **lazy** (VM
+commands work without sss/paramiko installed) and `SssError` is wrapped as
+`VMCtlError` so the CLI surface stays uniform.
+
+### Two file-into-guest paths (do not confuse them)
+
+vmctl now has two ways to put a file in the guest, with **opposite** dest and
+size rules — pick by transport availability and file size:
+
+| | `guest copy-to` | `push` (sss / SSH) |
+|---|---|---|
+| Channel | `vmcli Guest copyTo` (VMware Tools) | SSH / SFTP (needs sshd in guest) |
+| Dest arg | a full **file** path — a directory is rejected (`not a file`) | a remote **directory** — file lands at `dest/<basename>` |
+| Size | **≤ 60 KB** (refused above; vmcli fails silently) | unbounded |
+| Needs | Tools running | OpenSSH server + reachable guest IP |
+
+So a `dest` that works for `push` (a directory) is rejected by `copy-to`, and a
+file too big for `copy-to` is exactly what `push` is for. Command help strings
+cross-reference each other.
 
 ## Example dialogue
 

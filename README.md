@@ -31,11 +31,19 @@ operation needs `vmrun` versus `vmcli`.
 
 ## Installation
 
+vmctl depends on [`sss`](./sss) (SSH file-sync), embedded as a git submodule and
+installed editable. Install the submodule **before** vmctl so its dependency is
+satisfied:
+
 ```bash
-pip install -e .
+git submodule update --init   # fetch ./sss
+pip install -e ./sss          # the sync dependency (pulls in paramiko)
+pip install -e .              # vmctl itself
 ```
 
-This installs the `vmctl` console script and the `vmctl` Python package.
+This installs the `vmctl` console script and the `vmctl` Python package. (`sss`
+is imported lazily, so the core VM commands still work if it is absent — only
+`vmctl sync` / `vmctl push` require it.)
 
 ## Configuration
 
@@ -102,11 +110,24 @@ vmctl tools install myvm
 # Inspect raw VMX config
 vmctl inspect myvm
 vmctl parse-vmx myvm
+
+# File sync into the running guest over SSH (via sss; VM must be running with a
+# guest IP — sync never boots it). Build-config/arch come from the sss profile.
+vmctl sync myvm                          # full profile lifecycle
+vmctl sync                               # auto-select the single running VM
+vmctl push myvm ./build "C:\app"         # ad-hoc transfer (any size, dir dest)
+vmctl push -- ./build "C:\app"           # auto-select (leading -- before paths)
 ```
 
 Command groups: `vm`, `auth`, `power`, `snapshot`, `network`, `peripheral`,
 `guest`, `fs`, `tools`, `shares`, `mks`, `vars`, `clipboard`, plus the top-level
-`inspect` and `parse-vmx`.
+`inspect`, `parse-vmx`, `sync`, and `push`.
+
+**Two file-into-guest paths — don't confuse them.** `guest copy-to` uses VMware
+Tools, takes a **file** destination, and is capped at ~60 KB; `push` uses
+SSH/SFTP, takes a **directory** destination, and has no size limit but needs an
+OpenSSH server in the guest. Use `copy-to` for tiny files when only Tools is
+available; use `push` for everything larger or when syncing a tree.
 
 ## Library usage
 
@@ -127,7 +148,7 @@ print(vm.guest.ps())
 
 Each `VM` exposes the same subsystems as the CLI groups: `power`, `snapshot`,
 `network`, `peripheral`, `guest`, `clipboard`, `fs`, `tools`, `shares`, `mks`,
-`vars`, and `inspect`.
+`vars`, `inspect`, and `sync` (`vm.sync.run()` / `vm.sync.push()`).
 
 ## Notes & known constraints
 

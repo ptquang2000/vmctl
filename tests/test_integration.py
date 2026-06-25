@@ -25,6 +25,7 @@ host, and assert on the host-side content.
 """
 
 import os
+import socket
 import tempfile
 import time
 import warnings
@@ -32,6 +33,14 @@ import warnings
 import pytest
 
 from vmctl import VMCtl
+from vmctl.exceptions import VMCtlError
+
+# Gate the whole module behind VMCTL_INTEGRATION=1 (these boot a real VM); a bare
+# ``pytest`` run skips them instead of trying to drive VMware.
+pytestmark = pytest.mark.skipif(
+    not os.environ.get("VMCTL_INTEGRATION"),
+    reason="live VM tests; set VMCTL_INTEGRATION=1 to run",
+)
 
 VM_NAME = "vmctl-unittest"
 SNAPSHOT = "init"
@@ -85,7 +94,7 @@ def _boot_clean_vm():
     except Exception:
         pass
     vm.snapshot.revert(SNAPSHOT)
-    vm.power.start()
+    vm.power.start(gui=False)  # headless -- no Workstation console window
     _wait_for_tools(vm)
     return vm
 
@@ -178,7 +187,7 @@ def snapshot_vm():
     """
     vm = VMCtl().get(VM_NAME)
     _revert_init_and_purge(vm)
-    vm.power.start()
+    vm.power.start(gui=False)  # headless
     _wait_for_tools(vm)
     try:
         yield vm
@@ -324,6 +333,113 @@ def test_guest_copy_roundtrip(guest_vm):
     assert content.strip() == payload
 
 
+# --- sync/push (sss over SSH) -------------------------------------------------
+# These share the guest_vm boot (no new cycle). They require the prerequisite an
+# OpenSSH server in the ``init`` snapshot reachable as test/test on port 22 (see
+# tests/INTEGRATION.md); until that exists they skip rather than fail, leaving
+# the rest of the suite unaffected. Clean cross-check: sss writes over SSH, vmctl
+# reads back over Tools.
+SYNC_DIR = r"C:\vmctl-sync-test"
+
+
+def _resolve_guest_ip(vm, timeout_s=90, poll_s=3) -> str:
+    """Poll until the guest reports an IP, or return "" after ``timeout_s``.
+
+    ``_wait_for_tools`` gates on the interactive Tools session, NOT the network
+    lease -- so right after a memory-snapshot resume the NIC may not yet hold a
+    DHCP lease, and ``vmrun getGuestIPAddress`` *raises* "Unable to get the IP
+    address" (not an empty string) until it does. sync's design is single-read /
+    no-poll because the *caller* readies the guest; this harness is that caller,
+    so it waits for the address here before driving sync over SSH.
+    """
+    def _ip():
+        try:
+            return vm.network.ip().get("ip", "")
+        except VMCtlError:
+            return ""
+    return _poll(_ip, timeout_s=timeout_s, poll_s=poll_s) or ""
+
+
+def _require_sshd(vm) -> str:
+    """Wait for the guest IP + a reachable sshd on port 22; skip if absent."""
+    ip = _resolve_guest_ip(vm)
+    if not ip:
+        pytest.skip(
+            "guest never reported an IP -- the init snapshot needs a connected "
+            "NIC; see tests/INTEGRATION.md"
+        )
+
+    def _port_open():
+        try:
+            with socket.create_connection((ip, 22), timeout=5):
+                return True
+        except OSError:
+            return False
+
+    if not _poll(_port_open, timeout_s=30, poll_s=3):
+        pytest.skip(
+            f"no sshd reachable at {ip}:22 -- the init snapshot needs an OpenSSH "
+            "server (test/test); see tests/INTEGRATION.md"
+        )
+    return ip
+
+
+def test_sync_push_lands_file(guest_vm):
+    """``vm.sync.push`` a host file into a guest dir; read it back over Tools."""
+    _require_sshd(guest_vm)
+    payload = "pushed-over-ssh-7"
+    with tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", suffix=".txt", delete=False
+    ) as f:
+        f.write(payload)
+        host_in = f.name
+    basename = os.path.basename(host_in)
+    with tempfile.NamedTemporaryFile(suffix=".txt", delete=False) as f:
+        host_out = f.name
+    try:
+        result = guest_vm.sync.push(host_in, SYNC_DIR)
+        assert result["uploaded_count"] >= 1
+        # vmctl reads back over Tools -- the cross-channel confirmation.
+        listing = guest_vm.fs.ls(SYNC_DIR)
+        assert basename in listing["entries"]
+        guest_vm.guest.copy_from(rf"{SYNC_DIR}\{basename}", host_out, overwrite=True)
+        with open(host_out, encoding="utf-8", errors="replace") as f:
+            content = f.read()
+    finally:
+        os.unlink(host_in)
+        os.unlink(host_out)
+    assert content.strip() == payload
+
+
+def test_sync_lifecycle_injected_profile(guest_vm):
+    """``vm.sync.run`` with an injected throwaway Profile + base_dir (touches no
+    real ~/.sss/config.json); assert the mapped file landed in the guest."""
+    _require_sshd(guest_vm)
+    from sss import Profile
+
+    payload = "lifecycle-mapped-file-9"
+    base_dir = tempfile.mkdtemp()
+    src_name = "mapped.txt"
+    with open(os.path.join(base_dir, src_name), "w", encoding="utf-8") as f:
+        f.write(payload)
+    dest_dir = SYNC_DIR + r"\lifecycle"
+    profile = Profile(name="test-injected", source_files={src_name: dest_dir})
+
+    with tempfile.NamedTemporaryFile(suffix=".txt", delete=False) as f:
+        host_out = f.name
+    try:
+        result = guest_vm.sync.run(profile=profile, base_dir=base_dir)
+        assert result["sync"]["uploaded_count"] >= 1
+        guest_vm.guest.copy_from(rf"{dest_dir}\{src_name}", host_out, overwrite=True)
+        with open(host_out, encoding="utf-8", errors="replace") as f:
+            content = f.read()
+    finally:
+        os.unlink(host_out)
+        os.unlink(os.path.join(base_dir, src_name))
+        os.rmdir(base_dir)
+    assert content.strip() == payload
+
+
 # --------------------------------------------------------------------------- #
 # clipboard_vm group                                                          #
 # --------------------------------------------------------------------------- #
@@ -438,7 +554,7 @@ def test_snapshot_memory_resume(snapshot_vm):
     #    the VM running, revert(..., ensure_running=True) hard-stops it, reverts,
     #    and starts it again in one call -- exercising the running-VM auto-stop
     #    path and leaving the VM running (no manual stop/start here).
-    vm.snapshot.revert(LIVETEST_SNAPSHOT, ensure_running=True)
+    vm.snapshot.revert(LIVETEST_SNAPSHOT, ensure_running=True, gui=False)
     _wait_for_tools(vm)
 
     # 6a. PID survival -- the hard, cold-boot-impossible assertion. The SAME pid

@@ -14,6 +14,7 @@ from .modules.peripheral import PeripheralModule
 from .modules.power import PowerModule
 from .modules.shares import SharesModule
 from .modules.snapshot import SnapshotModule
+from .modules.sync import SyncModule
 from .modules.tools import ToolsModule
 from .modules.vars import VarsModule
 
@@ -41,6 +42,10 @@ class VM:
         self.mks = MKSModule(vmx_path, runner)
         self.vars = VarsModule(vmx_path, runner, credentials)
         self.inspect = InspectModule(vmx_path, runner)
+        # File-sync by composition over sss: feeds the resolved guest IP +
+        # stored credentials to sss.connect (see docs/adr/0003). No runner
+        # access -- it only needs network (live IP) and power (running gate).
+        self.sync = SyncModule(self.network, self.power, credentials)
 
     @functools.cached_property
     def _guest_os(self) -> str:

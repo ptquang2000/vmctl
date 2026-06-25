@@ -6,13 +6,16 @@ class PowerModule:
     def state(self) -> dict:
         return self._r.run_vmcli_json(self._vmx, "Power", "query", "-f", "json")
 
-    def start(self, paused: bool = False) -> dict:
+    def start(self, paused: bool = False, gui: bool = True) -> dict:
         # vmcli Power Start requires __vmware__ group membership; vmrun works without it
         args = ["start", self._vmx]
         if paused:
             args.append("nogui")  # vmrun has no --paused; use nogui as closest proxy
         else:
-            args.append("gui")
+            # gui opens the Workstation console; nogui boots headless (in the
+            # background) -- the memory snapshot's interactive session is
+            # restored either way.
+            args.append("gui" if gui else "nogui")
         self._r.run_vmrun(*args)
         return {"success": True}
 

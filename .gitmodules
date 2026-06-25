@@ -1,0 +1,3 @@
+[submodule "sss"]
+	path = sss
+	url = git@github.com:ptquang2000/sss.git

@@ -27,7 +27,7 @@ class SnapshotModule:
             args += ["--description", description]
         return self._r.run_vmcli_action(self._vmx, *args)
 
-    def revert(self, name: str, ensure_running: bool = False) -> dict:
+    def revert(self, name: str, ensure_running: bool = False, gui: bool = True) -> dict:
         # Validate the snapshot name BEFORE touching power, so a typo never
         # leaves the VM powered off for nothing.
         uid = self._resolve_uid(name)
@@ -42,7 +42,7 @@ class SnapshotModule:
         # ensure_running forces a start regardless (suspended -> resume,
         # off -> cold boot).
         if online or ensure_running:
-            self._power.start()
+            self._power.start(gui=gui)
         return {"success": True}
 
     def delete(self, name: str, delete_children: bool = False) -> dict:
