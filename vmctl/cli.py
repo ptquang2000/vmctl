@@ -799,9 +799,13 @@ def clipboard():
 
 @clipboard.command("push")
 @click.argument("name", required=False)
-@click.argument("text")
+@click.argument("text", required=False)
 def clipboard_push(name, text):
     try:
+        if text is None and not sys.stdin.isatty():
+            text = sys.stdin.read()
+        if not text:
+            _err("clipboard text is empty")
         vm = _resolve(name)
         _out_vm(vm, vm.clipboard.push_text(text))
     except (VMCtlError, ValueError) as e:
