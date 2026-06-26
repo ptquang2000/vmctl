@@ -111,9 +111,9 @@ Rules and rationale:
 - **Failure modes:** zero running in scope → `no running VM to auto-select; pass
   a name`; two or more → error listing them, `pass a name`.
 
-## CLI short forms — option flags & command prefixes (ADR-0005)
+## CLI short forms — option flags (ADR-0005)
 
-The CLI is no longer long-form-only. Two independent short-form mechanisms:
+The CLI is no longer long-form-only: options carry short flags.
 
 - **Short option flags are command-scoped mnemonics, not a global letter map.**
   Click resolves short flags per command, so the only rule is within-command
@@ -125,13 +125,6 @@ The CLI is no longer long-form-only. Two independent short-form mechanisms:
   `--prefix` (`fs mktemp`). **Per-command `--help` is the source of truth** —
   short flags are deliberately *not* portable across commands. The only soft
   convention: where a command takes credentials, `-u`/`-p` = user/password.
-- **Every command gets a short form via unambiguous-prefix resolution**
-  (`AliasedGroup`): any prefix matching exactly one command resolves to it
-  (`po stat` → `power state`, `sn ta` → `snapshot take`, `per conn` →
-  `peripheral connect`); a prefix matching more than one is a **hard error**
-  listing candidates (`po sta` → start, state); no match → normal "no such
-  command". Long names stay canonical for help/docs/completion. `VMGroup`
-  extends `AliasedGroup`, so prefixes compose with the leading-`--` marker.
 
 ## snapshot revert lifecycle
 
@@ -288,9 +281,9 @@ convention used by `peripheral`.
 
 > Short flags `-u`/`-p` here are command-scoped (user/password). The repo-wide
 > short-form convention this change originally deferred has since been taken on —
-> per-command mnemonic flags plus unambiguous command-prefix resolution; see
-> **CLI short forms** above and **ADR-0005**. The collision worry (`-p`/`-d`/`-o`
-> reused across commands) is moot because Click scopes short flags per command.
+> per-command mnemonic flags; see **CLI short forms** above and **ADR-0005**. The
+> collision worry (`-p`/`-d`/`-o` reused across commands) is moot because Click
+> scopes short flags per command.
 
 ### Two file-into-guest paths (do not confuse them)
 

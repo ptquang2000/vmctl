@@ -126,9 +126,7 @@ Command groups: `vm`, `auth`, `power`, `snapshot`, `network`, `peripheral`,
 
 **Short forms (ADR-0005).** Options have short flags (`-m`/`--memory`,
 `-H`/`--hard`, `-p`/`--parents`, …) — they are per-command mnemonics, so the
-authority is each command's `--help`, not a global letter map. Commands also
-accept any **unambiguous prefix** (`vmctl po stat`, `vmctl sn ta`,
-`vmctl per conn`); an ambiguous prefix errors with the candidates.
+authority is each command's `--help`, not a global letter map.
 
 **Two file-into-guest paths — don't confuse them.** `guest copy-to` uses VMware
 Tools, takes a **file** destination, and is capped at ~60 KB; `push` uses

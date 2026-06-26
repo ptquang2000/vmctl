@@ -339,23 +339,8 @@ def test_mkdir_dash_p_is_parents_unix_convention(run):
 
 
 # --------------------------------------------------------------------------- #
-# command prefix resolution (unambiguous short forms)                         #
+# command resolution                                                          #
 # --------------------------------------------------------------------------- #
-
-
-def test_unambiguous_prefix_resolves_group_and_command(run):
-    # `po stat` -> `power state`; nested groups resolve too.
-    result, payload = run(["po", "stat", "myvm"])
-    assert result.exit_code == 0
-    assert payload["called"] == "state"
-
-
-def test_ambiguous_prefix_fails_with_candidates(run):
-    # `po sta` is ambiguous: start vs state.
-    result, _ = run(["po", "sta", "myvm"])
-    assert result.exit_code != 0
-    assert "Ambiguous" in result.output
-    assert "start" in result.output and "state" in result.output
 
 
 def test_unknown_command_still_errors(run):

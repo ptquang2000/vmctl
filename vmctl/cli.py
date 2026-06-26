@@ -52,38 +52,11 @@ class VMCommand(click.Command):
         return super().parse_args(ctx, args)
 
 
-class AliasedGroup(click.Group):
-    """A group whose subcommands also answer to any **unambiguous prefix** of
-    their name -- the short form of every command, for free and self-maintaining.
-
-    ``vmctl po sta`` -> ``power start``, ``vmctl sn ta`` -> ``snapshot take``.
-    An exact name always wins; a prefix matching more than one command is a hard
-    error listing the candidates (never a silent pick); no match defers to
-    Click's normal "no such command". This keeps long names canonical (help,
-    completion, docs) while giving terse invocation, instead of a hand-curated
-    alias table that must be kept collision-free by hand.
-    """
-
-    def get_command(self, ctx, cmd_name):
-        cmd = super().get_command(ctx, cmd_name)
-        if cmd is not None:
-            return cmd
-        matches = [n for n in self.list_commands(ctx) if n.startswith(cmd_name)]
-        if len(matches) == 1:
-            return super().get_command(ctx, matches[0])
-        if len(matches) > 1:
-            ctx.fail(
-                f"Ambiguous command {cmd_name!r}; matches: "
-                f"{', '.join(sorted(matches))}."
-            )
-        return None
-
-
-class VMGroup(AliasedGroup):
+class VMGroup(click.Group):
     command_class = VMCommand
 
 
-@click.group(cls=AliasedGroup)
+@click.group()
 def cli():
     pass
 
