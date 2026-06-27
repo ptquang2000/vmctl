@@ -6,7 +6,7 @@
 
 A VM can only be referred to by the auto-discovered registry name — the `.vmx`
 file's stem (lowercased). That handle is whatever VMware named the folder/file,
-which is often long or unmemorable (`windows-10-x64`, `vmctl-unittest`), and is
+which is often long or unmemorable (`windows-10-x64`, `vmctl`), and is
 strictly limited to VMs found under the configured `scan_roots`. There is no way
 to:
 

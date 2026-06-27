@@ -12,7 +12,7 @@ from vmctl.exceptions import VMCtlError
 from vmctl.modules.peripheral import PeripheralModule
 
 
-# Mirrors the live shape of `vmcli Disk query -f json` against vmctl-unittest:
+# Mirrors the live shape of `vmcli Disk query -f json` against vmctl:
 # cdroms carry connectionStatus + a cdrom_image backing; disks omit
 # connectionStatus (a fixed disk is always attached while present).
 DISK_QUERY = {

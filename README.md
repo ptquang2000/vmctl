@@ -171,13 +171,17 @@ Each `VM` exposes the same subsystems as the CLI groups: `power`, `snapshot`,
 ## Development
 
 ```bash
-# Unit tests (no VMware required)
+# Full suite — unit tests plus the live integration tests
 pytest
 
-# Integration tests (drive a real VM; opt-in)
-VMCTL_INTEGRATION=1 pytest tests/test_integration.py
+# Unit tests only (no VMware required)
+pytest --ignore=tests/test_integration.py
+
+# Integration tests only (drive a real VM)
+pytest tests/test_integration.py
 ```
 
-Integration tests require a provisioned test VM with VMware Tools installed and
-a reverting base snapshot. See `tests/INTEGRATION.md` for the one-time
+The integration tests are no longer opt-in: a plain `pytest` run drives a real
+VM. They require a provisioned test VM (`vmctl`) with VMware Tools installed and
+a reverting `init` snapshot. See `tests/INTEGRATION.md` for the one-time
 provisioning runbook.

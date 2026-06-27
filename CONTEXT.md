@@ -163,7 +163,7 @@ Both *reads* and *writes* use `vmrun` when vmcli can't serve them:
 - `vars.read()`/`vars.write()` both use vmrun (no vmcli variable namespace).
 - `network.ip()` reads via vmrun — `vmcli Ethernet query` only returns **adapter config**, never the **guest IP**. This is *not* an exception to the rule; it is the rule.
 
-## network.ip() contract (verified live against `vmctl-unittest`, 2026-06-22)
+## network.ip() contract (verified live against `vmctl`, 2026-06-22)
 
 `network.ip()` → `vmrun -T ws getGuestIPAddress <vmx>` (no `-wait`), returns `{"ip": <str>}`.
 
@@ -191,12 +191,12 @@ gate, `ip()` catches the "not running" failure and falls back to
 gate, no guest creds). The fallback fires **only** on a "not running" message —
 "not powered on" still raises, so a genuinely-off VM is never masked. If the
 cached `guestinfo.ip` is also empty, the original error is re-raised. (Verified
-live against `vmctl-unittest`, 2026-06-25.)
+live against `vmctl`, 2026-06-25.)
 
 ## Guest file copy (`guest.copy_to` / `guest.copy_from`)
 
 `vmcli Guest copyTo/copyFrom` require `<toPath>` to be a full **file** path. Verified live
-against `vmctl-unittest` (which now has Tools):
+against `vmctl` (which now has Tools):
 
 - **Directory destinations are rejected.** Any path that resolves to an existing directory —
   `C:\`, `C:\Users`, bare `C:` — fails with `The object is not a file`. It is a guest-side

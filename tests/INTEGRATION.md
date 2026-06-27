@@ -1,13 +1,13 @@
-# Integration-test setup — `vmctl-unittest` + the `init` snapshot
+# Integration-test setup — `vmctl` + the `init` snapshot
 
 The live integration suite (`tests/test_integration.py`) drives a real VM
-through guest operations. It is gated by `VMCTL_INTEGRATION=1` and skipped
-otherwise. To run it you need the throwaway VM **`vmctl-unittest`** with a
-snapshot named **`init`**.
+through guest operations. It runs as part of a plain `pytest` invocation, so
+you need the throwaway VM **`vmctl`** with a snapshot named **`init`**
+available locally before running the suite.
 
 This is a *one-time* manual setup. Once the snapshot exists it is reused by every
 test run forever — the destructive `revert`/hard-stop fixtures only ever touch
-`vmctl-unittest`, never a VM you use for other work.
+`vmctl`, never a VM you use for other work.
 
 ## Why a manual step is required
 
@@ -28,13 +28,13 @@ these exact fixtures.
 ## One-time provisioning procedure
 
 VMware binaries live at `C:\Program Files\VMware\VMware Workstation\{vmcli,vmrun}.exe`
-(not on PATH). The `vmctl-unittest` VMX is under
-`C:\Users\<you>\Documents\Virtual Machines\vmctl-unittest\`.
+(not on PATH). The `vmctl` VMX is under
+`C:\Users\<you>\Documents\Virtual Machines\vmctl\`.
 
 1. **Start the VM with a GUI console** and log in once as `test` / `test`:
 
    ```
-   "C:\Program Files\VMware\VMware Workstation\vmrun.exe" -T ws start <path-to>\vmctl-unittest.vmx gui
+   "C:\Program Files\VMware\VMware Workstation\vmrun.exe" -T ws start <path-to>\vmctl.vmx gui
    ```
 
 2. **Install VMware Tools in the guest.** The bundled ISO is already mounted (if
@@ -48,7 +48,7 @@ VMware binaries live at `C:\Program Files\VMware\VMware Workstation\{vmcli,vmrun
 3. **Reboot the guest** and confirm Tools is running. From the host:
 
    ```
-   "C:\Program Files\VMware\VMware Workstation\vmcli.exe" <path-to>\vmctl-unittest.vmx Tools Query -f json
+   "C:\Program Files\VMware\VMware Workstation\vmcli.exe" <path-to>\vmctl.vmx Tools Query -f json
    ```
 
    Expect `running: true` and a non-zero `GuestCaps.copyPasteGuestVersion`
@@ -60,7 +60,7 @@ VMware binaries live at `C:\Program Files\VMware\VMware Workstation\{vmcli,vmrun
    is the point):
 
    ```
-   "C:\Program Files\VMware\VMware Workstation\vmrun.exe" -T ws snapshot <path-to>\vmctl-unittest.vmx init
+   "C:\Program Files\VMware\VMware Workstation\vmrun.exe" -T ws snapshot <path-to>\vmctl.vmx init
    ```
 
    `vmctl snapshot take init` works too, as long as the VM is running and
@@ -68,14 +68,22 @@ VMware binaries live at `C:\Program Files\VMware\VMware Workstation\{vmcli,vmrun
 
 5. Power the VM off. Each fixture's `revert` requires the VM off/suspended first.
 
-## OpenSSH prerequisite for the sync/push tests
+## OpenSSH prerequisite for the SSH-based tests
 
-The two sync tests (`test_sync_push_lands_file`,
-`test_sync_lifecycle_injected_profile`) transfer files **over SSH** via the `sss`
-library — a different channel from the Tools-based `guest copy-to`. They share
-the `guest_vm` boot (no extra cycle) but need an **OpenSSH server inside the
-`init` snapshot**, reachable as `test` / `test` on **port 22**. This is the same
-one-time-snapshot-update model as the Tools provisioning above.
+Two sets of tests go **over SSH** via the `sss` library — a different channel
+from the Tools-based `guest copy-to`:
+
+- The two vmctl sync tests (`test_sync_push_lands_file`,
+  `test_sync_lifecycle_injected_profile`), which share the `guest_vm` boot.
+- The **sss group** (`test_sss_*`), which exercises sss's own primitives (SFTP,
+  `sc.exe`, `del`/`rmdir`, `taskkill`, session-survival) against the live guest.
+  These were moved out of the sss submodule's own suite (per sss ADR-0004, which
+  keeps sss target-agnostic and vmctl-free); vmctl boots the VM and hands sss a
+  plain host + the stored guest creds via `sss.connect(...)`.
+
+All of them need an **OpenSSH server inside the `init` snapshot**, reachable as
+`test` / `test` on **port 22**. This is the same one-time-snapshot-update model
+as the Tools provisioning above.
 
 To add it before re-taking the `init` snapshot (step 4), from an elevated guest
 PowerShell:
@@ -88,18 +96,20 @@ Set-Service -Name sshd -StartupType Automatic
 
 Confirm the host can reach it (`Test-NetConnection <guest-ip> -Port 22`), then
 take the `init` snapshot while logged in. Until the snapshot carries a reachable
-sshd, the two sync tests **skip** (they probe port 22 first) rather than fail, so
-the rest of the suite is unaffected.
+sshd, the SSH-based tests (the two sync tests and the whole `sss` group) **skip**
+(they probe port 22 first) rather than fail, so the rest of the suite is
+unaffected.
 
 ## Running the suite
 
 ```
-VMCTL_INTEGRATION=1 pytest tests/test_integration.py
+pytest tests/test_integration.py
 ```
 
-Each domain group (fs / guest / clipboard / vars) reverts to `init`, boots
+Each domain group (fs / guest / clipboard / vars / sss) reverts to `init`, boots
 once, waits for an interactive session via `_wait_for_tools`, runs its tests, and
-hard-stops the VM on teardown.
+hard-stops the VM on teardown. The `sss` group additionally connects sss over SSH
+(`_require_sshd`) and exercises sss's primitives against the live guest.
 
 ## Readiness gate
 

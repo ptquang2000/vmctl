@@ -6,7 +6,7 @@ from ..exceptions import VMCtlError
 
 # vmcli Guest copyTo silently fails on sizeable files: ≤60 KB copies fine,
 # ≥64 KB fails with an opaque "Unknown error" and the file never lands in the
-# guest (verified live against vmctl-unittest, 2026-06-22). The wall sits in the
+# guest (verified live against vmctl, 2026-06-22). The wall sits in the
 # (60 KB, 64 KB] gray zone; we refuse at the highest proven-good size rather than
 # attempt a transfer that fails silently mid-flight. See CONTEXT.md "Guest file
 # copy".

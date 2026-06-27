@@ -75,6 +75,6 @@ passes no extra substitution vars.
 - `vmctl sync`/`push` fail fast on a not-running or lease-less VM instead of
   hanging or syncing to a stale address — the no-boot rule is a deliberate
   divergence from the ADR-0002 lifecycle precedent and is documented as such.
-- A new live integration prerequisite: the `vmctl-unittest` `init` snapshot must
+- A new live integration prerequisite: the `vmctl` `init` snapshot must
   run an OpenSSH server reachable as `test`/`test` (sss is SSH-only). Recorded in
   tests/INTEGRATION.md.
