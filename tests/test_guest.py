@@ -27,6 +27,36 @@ def _from_path_host_dest(mod):
     return mod._r.run_vmcli_action.call_args.args[-1]
 
 
+# --- run() arg-ordering tests ---
+
+def test_run_places_flags_before_program():
+    # vmcli Guest run treats everything after the program path as a program-arg
+    # token, so --noWait/--interactive must precede the program.
+    mod = make_module()
+    mod.run("cmd.exe", "/c start explorer.exe", interactive=True)
+    args = list(mod._r.run_vmcli_action.call_args.args)
+    prog_idx = args.index("cmd.exe")
+    assert args.index("--noWait") < prog_idx
+    assert args.index("--interactive") < prog_idx
+    # Program args stay after the program, in order.
+    assert args[prog_idx:] == ["cmd.exe", "/c start explorer.exe"]
+
+
+def test_run_omits_interactive_by_default():
+    mod = make_module()
+    mod.run("cmd.exe", "/c echo hi")
+    args = list(mod._r.run_vmcli_action.call_args.args)
+    assert "--interactive" not in args
+    assert "--noWait" in args
+
+
+def test_run_no_wait_false_omits_flag():
+    mod = make_module()
+    mod.run("cmd.exe", "/c echo hi", no_wait=False)
+    args = list(mod._r.run_vmcli_action.call_args.args)
+    assert "--noWait" not in args
+
+
 # --- _basename / _resolve_dest unit tests ---
 
 def test_basename_both_separators():

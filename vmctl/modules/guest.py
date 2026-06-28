@@ -60,13 +60,17 @@ class GuestModule:
         no_wait: bool = True,
         interactive: bool = False,
     ) -> dict:
-        args = ["Guest", "run"] + self._cred_args() + [program]
-        if prog_args:
-            args += list(prog_args)
+        # Flags must precede the program: vmcli Guest run treats everything
+        # after the program path as program-argument tokens, so a trailing
+        # --noWait/--interactive would be (mis)handled as a program arg.
+        args = ["Guest", "run"] + self._cred_args()
         if no_wait:
             args.append("--noWait")
         if interactive:
             args.append("--interactive")
+        args.append(program)
+        if prog_args:
+            args += list(prog_args)
         return self._r.run_vmcli_action(self._vmx, *args)
 
     def ps(self) -> dict:

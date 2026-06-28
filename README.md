@@ -91,6 +91,8 @@ vmctl snapshot delete myvm clean --delete-children
 
 # Guest operations (need credentials configured)
 vmctl guest run myvm "cmd.exe" "/c echo hello > C:\\out.txt"
+# GUI apps need --interactive to appear on the guest desktop (see notes below)
+vmctl guest run myvm --interactive -- "cmd.exe" "/c start explorer.exe"
 vmctl guest ps myvm
 vmctl guest copy-to myvm ./local.txt "C:\\local.txt"
 vmctl guest copy-from myvm "C:\\out.txt" ./out.txt
@@ -167,6 +169,12 @@ Each `VM` exposes the same subsystems as the CLI groups: `power`, `snapshot`,
 - **Guest commands on Windows** should be funneled through `cmd.exe` with a
   single combined `/c …` argument — `vmcli Guest run` accepts only one program
   argument token.
+- **GUI programs need `guest run --interactive`.** Without it the program runs
+  in the non-interactive Session 0, so any window it opens is invisible on the
+  logged-in user's desktop (the call still reports `"success": true` because the
+  process launched). Pass `--interactive` to place it on the interactive desktop.
+  Conversely, output-capturing commands (e.g. clipboard reads) must stay
+  non-interactive, since an interactive process's stdout isn't inherited.
 
 ## Development
 

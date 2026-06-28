@@ -385,14 +385,21 @@ def guest():
 
 @guest.command("run")
 @click.argument("name", required=False)
+@click.option(
+    "--interactive/--no-interactive",
+    default=False,
+    help="Run on the guest's interactive desktop. Required for GUI apps to "
+    "appear; without it the program runs in the non-interactive Session 0 and "
+    "any window it opens is invisible.",
+)
 @click.argument("program_args", nargs=-1)
-def guest_run(name, program_args):
+def guest_run(name, interactive, program_args):
     if not program_args:
         _err("program is required")
     try:
         program, *args = program_args
         vm = _resolve(name)
-        _out_vm(vm, vm.guest.run(program, *args))
+        _out_vm(vm, vm.guest.run(program, *args, interactive=interactive))
     except (VMCtlError, ValueError) as e:
         _err(str(e))
 
