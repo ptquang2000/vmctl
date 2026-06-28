@@ -280,17 +280,21 @@ def _build_exec(program_args, guest_os: str, tty: bool):
     """Translate `exec` tokens + the ``-t`` flag into (program, prog_args).
 
     With ``-t`` the whole command line is wrapped in the guest shell as a single
-    detaching token -- ``cmd.exe /c start "" <cmd>`` on Windows, ``/bin/sh -c
-    '<cmd> &'`` elsewhere -- so PATH, builtins, pipes, and multiple arguments all
-    work and the launcher exits as soon as the program detaches. Without ``-t``
-    the program runs directly via vmcli, which accepts the program plus at most
-    one argument token; more than one raises (pointing at ``-t``).
+    token -- ``cmd.exe /c <cmd>`` on Windows, ``/bin/sh -c <cmd>`` elsewhere --
+    so PATH, builtins, pipes, and multiple arguments all work. Detachment is
+    handled by vmcli's ``--noWait`` (see ``cmd_exec``), NOT by a guest-shell
+    launcher: an earlier ``start "" <cmd>`` wrap spawned a *nested* console,
+    which under vmcli's ``--interactive`` session exhausts the guest's desktop
+    heap and fails with "Not enough memory resources are available to process
+    this command." Without ``-t`` the program runs directly via vmcli, which
+    accepts the program plus at most one argument token; more than one raises
+    (pointing at ``-t``).
     """
     if tty:
         cmd = " ".join(program_args)
         if "windows" in (guest_os or "").lower():
-            return _CMD_EXE, [f'/c start "" {cmd}']
-        return "/bin/sh", ["-c", f"{cmd} &"]
+            return _CMD_EXE, [f"/c {cmd}"]
+        return "/bin/sh", ["-c", cmd]
     if len(program_args) > 2:
         raise VMCtlError(
             "multiple arguments need a shell; use: "
@@ -326,10 +330,11 @@ def cmd_exec(name, interactive, tty, program_args):
         vm = _resolve(name)
         guest_os = vm._guest_os if tty else ""
         program, args = _build_exec(program_args, guest_os, tty)
-        # -i launches fire-and-forget (--noWait); headless modes wait on the
-        # launch (which is immediate for -t, since the program detaches).
+        # -t and -i both launch fire-and-forget (--noWait); only a bare,
+        # direct program waits on the launch. exec never returns guest stdout
+        # (a vmcli limitation), so waiting buys nothing for shell-wrapped runs.
         vm.guest.run(
-            program, *args, no_wait=interactive, interactive=interactive)
+            program, *args, no_wait=interactive or tty, interactive=interactive)
         click.echo(render.exec_launched(vm.name))
     except (VMCtlError, ValueError) as e:
         _err(str(e))

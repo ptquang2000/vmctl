@@ -446,8 +446,8 @@ def test_exec_tty_windows_wraps_in_cmd(exec_run):
     assert result.exit_code == 0
     assert rec.calls == [{
         "program": r"C:\Windows\System32\cmd.exe",
-        "args": ['/c start "" notepad foo.txt'],
-        "no_wait": False, "interactive": False,
+        "args": ['/c notepad foo.txt'],
+        "no_wait": True, "interactive": False,
     }]
 
 
@@ -457,8 +457,8 @@ def test_exec_tty_linux_wraps_in_sh(exec_run):
     assert result.exit_code == 0
     assert rec.calls == [{
         "program": "/bin/sh",
-        "args": ["-c", "ls -la &"],
-        "no_wait": False, "interactive": False,
+        "args": ["-c", "ls -la"],
+        "no_wait": True, "interactive": False,
     }]
 
 
@@ -476,7 +476,7 @@ def test_exec_it_combines_shell_and_desktop(exec_run):
     assert result.exit_code == 0
     assert rec.calls == [{
         "program": r"C:\Windows\System32\cmd.exe",
-        "args": ['/c start "" notepad'],
+        "args": ['/c notepad'],
         "no_wait": True, "interactive": True,
     }]
 
@@ -509,12 +509,12 @@ def test_build_exec_bare_multi_arg_raises():
 
 def test_build_exec_tty_windows():
     assert _build_exec(["notepad", "x"], "windows9-64", tty=True) == (
-        r"C:\Windows\System32\cmd.exe", ['/c start "" notepad x'])
+        r"C:\Windows\System32\cmd.exe", ['/c notepad x'])
 
 
 def test_build_exec_tty_non_windows():
     assert _build_exec(["ls", "-la"], "ubuntu-64", tty=True) == (
-        "/bin/sh", ["-c", "ls -la &"])
+        "/bin/sh", ["-c", "ls -la"])
 
 
 # --------------------------------------------------------------------------- #
