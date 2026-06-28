@@ -136,6 +136,30 @@ def test_leading_dashdash_on_guest_run(run):
     assert payload["args"] == ["cmd.exe", "/c", "echo", "hi"]
 
 
+def test_dashdash_after_option_still_auto_selects(run):
+    # `--interactive` before `--`: the marker must still drop the name and
+    # auto-select, not let `cmd.exe` slip into the name slot.
+    result, payload = run(
+        ["guest", "run", "--interactive", "--", "cmd.exe", "/c", "start", "."],
+        running=("box",),
+    )
+    assert result.exit_code == 0
+    assert payload["vm"] == "box"  # auto-selected, NOT "cmd.exe"
+    assert payload["args"] == ["cmd.exe", "/c", "start", "."]
+    assert payload["kwargs"]["interactive"] is True
+
+
+def test_dashdash_after_explicit_name_is_conventional_on_guest_run(run):
+    # Explicit name before the option: `--` keeps end-of-options meaning.
+    result, payload = run(
+        ["guest", "run", "myvm", "--interactive", "--", "cmd.exe", "/c", "x"],
+    )
+    assert result.exit_code == 0
+    assert payload["vm"] == "myvm"
+    assert payload["args"] == ["cmd.exe", "/c", "x"]
+    assert payload["kwargs"]["interactive"] is True
+
+
 def test_non_leading_dashdash_is_conventional(run):
     # `--` after the name keeps Click's end-of-options meaning; s1 still binds.
     result, payload = run(["snapshot", "take", "myvm", "--", "s1"])

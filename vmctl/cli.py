@@ -41,14 +41,22 @@ class VMCommand(click.Command):
     """A command whose VM-name positional may be dropped via a leading ``--``.
 
     Click natively consumes ``--`` (end-of-options) and shifts nothing, so we
-    intercept a *leading* ``--`` here and swap in the auto-select sentinel for
-    the name positional. Only the leading ``--`` is special; later ``--`` and
-    flags keep their conventional meaning.
+    intercept the ``--`` that stands in for a dropped name and swap in the
+    auto-select sentinel for the name positional. The marker may follow leading
+    options (e.g. ``guest run --interactive -- cmd.exe …``), so we accept the
+    first ``--`` that is preceded only by option tokens. A ``--`` that comes
+    after a real positional (an explicit VM name) keeps its conventional
+    end-of-options meaning.
     """
 
     def parse_args(self, ctx, args):
-        if args and args[0] == "--":
-            args = [_AUTO] + list(args[1:])
+        for i, tok in enumerate(args):
+            if tok == "--":
+                if all(a.startswith("-") for a in args[:i]):
+                    args = list(args[:i]) + [_AUTO] + list(args[i + 1:])
+                break
+            if not tok.startswith("-"):
+                break
         return super().parse_args(ctx, args)
 
 

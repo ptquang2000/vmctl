@@ -57,6 +57,37 @@ def test_run_no_wait_false_omits_flag():
     assert "--noWait" not in args
 
 
+def test_run_interactive_relative_path_hint():
+    # vmcli's interactive launch does not search the guest PATH, so a bare name
+    # fails "not found"; surface the absolute-path requirement.
+    mod = make_module()
+    mod._r.run_vmcli_action.side_effect = VMCtlError(
+        "vmcli.exe: A file was not found"
+    )
+    with pytest.raises(VMCtlError) as exc:
+        mod.run("cmd.exe", "/c start .", interactive=True)
+    assert "absolute path" in str(exc.value)
+
+
+def test_run_interactive_absolute_path_passes_error_through():
+    # An absolute path that still errors must not get the misleading hint.
+    mod = make_module()
+    mod._r.run_vmcli_action.side_effect = VMCtlError(
+        "vmcli.exe: A file was not found"
+    )
+    with pytest.raises(VMCtlError) as exc:
+        mod.run(r"C:\nope\cmd.exe", "/c x", interactive=True)
+    assert "absolute path" not in str(exc.value)
+
+
+def test_run_non_interactive_not_found_passes_through():
+    mod = make_module()
+    mod._r.run_vmcli_action.side_effect = VMCtlError("A file was not found")
+    with pytest.raises(VMCtlError) as exc:
+        mod.run("cmd.exe", "/c x")
+    assert "absolute path" not in str(exc.value)
+
+
 # --- _basename / _resolve_dest unit tests ---
 
 def test_basename_both_separators():

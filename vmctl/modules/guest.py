@@ -20,6 +20,12 @@ _LARGE_FILE_HINT = (
 )
 
 
+def _is_abs(path: str) -> bool:
+    # Treat a Windows drive-absolute ("C:\..."), UNC ("\\host\..."), or POSIX
+    # ("/...") path as absolute regardless of host os.path flavour.
+    return bool(re.match(r"[A-Za-z]:[\\/]|[\\/]{2}|/", path))
+
+
 def _basename(path: str) -> str:
     # Split on either separator so a Windows host path is handled correctly
     # regardless of which os.path flavour is active.
@@ -71,7 +77,21 @@ class GuestModule:
         args.append(program)
         if prog_args:
             args += list(prog_args)
-        return self._r.run_vmcli_action(self._vmx, *args)
+        try:
+            return self._r.run_vmcli_action(self._vmx, *args)
+        except VMCtlError as e:
+            # An interactive launch resolves the program on the host side and
+            # does NOT search the guest PATH, so a bare name like "cmd.exe"
+            # fails with "A file was not found" even though it works without
+            # --interactive. Point at the absolute-path requirement.
+            if interactive and "not found" in str(e).lower() and not _is_abs(program):
+                raise VMCtlError(
+                    f"interactive 'guest run' could not find '{program}'; "
+                    f"--interactive does not search the guest PATH, so the "
+                    f"program must be an absolute path (e.g. "
+                    f"'C:\\Windows\\System32\\cmd.exe')"
+                ) from e
+            raise
 
     def ps(self) -> dict:
         # vmcli Guest ps supports -f json (verified live); it returns a clean
