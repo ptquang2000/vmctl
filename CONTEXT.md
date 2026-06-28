@@ -1,139 +1,57 @@
 # vmctl Context
 
-vmctl wraps VMware Workstation's `vmcli.exe` and `vmrun.exe` into a JSON-native Python API and CLI. This file records the domain terms and architectural conventions that are not obvious from the code alone.
+vmctl wraps VMware Workstation's `vmcli.exe` and `vmrun.exe` into a JSON-native Python API and CLI. This file records domain terms and conventions not obvious from the code. Deep rationale lives in `docs/adr/`.
 
 ## Language
 
-**Adapter config**:
-The *static* virtual-NIC settings stored in the `.vmx` (connection type, MAC, network name). Surfaced by `network.list()` via `vmcli Ethernet query`. Exists whether or not the VM is running.
-_Avoid_: "network settings" (ambiguous with runtime state)
-
-**Guest IP**:
-The *runtime* IP address the running guest reports through `guestInfo`. Surfaced by `network.ip()` via `vmrun getGuestIPAddress`. Distinct from **adapter config** — it only exists once the guest is up and has been assigned an address.
-_Avoid_: "address" (vague — could read as MAC or adapter), "network IP"
-
-**Stale guest IP**:
-A *suspended* VM still answers `getGuestIPAddress` with its last-known IP (exit 0) — it does **not** error. So `network.ip()` on a suspended VM may return an address that is no longer valid after resume. Callers needing a guaranteed-live IP must confirm the VM is running first.
+- **Adapter config** — *static* virtual-NIC settings in the `.vmx` (connection type, MAC, network name). From `network.list()` via `vmcli Ethernet query`. Exists even when off. _Avoid_: "network settings".
+- **Guest IP** — *runtime* IP the running guest reports via `guestInfo`. From `network.ip()` via `vmrun getGuestIPAddress`. Only exists once the guest is up and addressed. _Avoid_: "address", "network IP".
+- **Stale guest IP** — a *suspended* VM still answers `getGuestIPAddress` with its last-known IP (exit 0, no error), which may be invalid after resume. Callers needing a live IP must confirm running first.
 
 ## Name aliases (config remapping)
 
-A VM can be referred to by a **remapped name** (an *alias*) defined in
-`~/.vmctl/config.json` under an `"aliases"` block, separate from the
-auto-discovered registry of `.vmx` stems:
+A VM may be referred to by a **remapped name** (*alias*) in `~/.vmctl/config.json` under `"aliases"`, separate from the auto-discovered registry of `.vmx` stems:
 
 ```jsonc
-{
-  "scan_roots": ["C:/Users/.../Virtual Machines"],
-  "aliases": {
-    "dev":   "windows-10-x64",          // -> a discovered VM (registry name)
-    "db":    "D:/VMs/db/db.vmx"          // -> a .vmx path (can be OUT of scope)
-  }
-}
+{ "scan_roots": ["C:/Users/.../Virtual Machines"],
+  "aliases": { "dev": "windows-10-x64",      // -> discovered VM (registry name)
+               "db":  "D:/VMs/db/db.vmx" } } // -> .vmx path (may be OUT of scope)
 ```
 
-**Alias**:
-A user-chosen handle that resolves to either a discovered VM's **name** or a
-direct **.vmx path**. The value is **sniffed**: path-shaped *and* the file
-exists ⇒ used as a path; otherwise ⇒ treated as a registry name and looked up
-through the normal stem resolution. Aliases are **edited by hand** in the config
-(like `scan_roots`); there is **no `vmctl alias` CLI verb**.
-_Avoid_: "rename" (the VM is not renamed; the alias is an additional input-side handle).
-
-**Resolution order** (in `VMRegistry.find()`): **exact alias** (case-insensitive)
-→ exact stem → unique substring → error. An alias therefore **always wins over a
-substring** and over a same-named stem — explicit config beats fuzzy discovery.
-
-**Aliases are input-only — the real VM name stays canonical.** Resolving via an
-alias does **not** change the `vm` output key or the credentials lookup key: both
-remain the real registry name (`name_for_path()` is unchanged). So
-`vmctl power state dev` returns `{"vm": "windows-10-x64", …}`, and credentials
-are keyed by `windows-10-x64`, not `dev`. The **one exception is intrinsic, not
-special-cased**: an alias to a `.vmx` path **outside the scan roots** has no
-registry name, so `name_for_path()` returns `None` and the alias falls through to
-become canonical via `get()`'s existing `or name` clause (credentials then keyed
-by the alias). Auto-select (the optional-name path below) never yields an alias —
-it reverse-maps a running `.vmx` and only knows real names.
-
-**One hop, no recursion.** An alias value is sniffed as a path *or* a stem,
-never as another alias — `dev → build → …` chains are not followed.
-
-**Broken-alias errors are distinct and name the alias** (raised as `ValueError`
-from `find()`, surfaced identically to other resolution errors since the CLI
-catches `(VMCtlError, ValueError)`):
-- path-shaped (ends `.vmx` or contains a separator) but missing ⇒
-  `alias 'dev' points to missing .vmx: <path>`
-- name-shaped but unresolvable ⇒ `alias 'dev' -> 'foo': VM not found`
+- **Alias** — a hand-edited handle resolving to either a discovered VM **name** or a direct **.vmx path**. Value is **sniffed**: path-shaped *and* file exists ⇒ path; else ⇒ registry name. No `vmctl alias` CLI verb. _Avoid_: "rename" (the alias is an extra input-side handle).
+- **Resolution order** (`VMRegistry.find()`): exact alias (case-insensitive) → exact stem → unique substring → error. An alias always wins over substring and over a same-named stem — explicit config beats fuzzy discovery.
+- **Input-only — the real VM name stays canonical.** Resolving via alias does not change the `vm` output key or the credentials key; both stay the real registry name (`name_for_path()` unchanged). One *intrinsic* exception: an alias to a `.vmx` **outside scan roots** has no registry name, so `name_for_path()` returns `None` and the alias becomes canonical via `get()`'s `or name` clause (creds keyed by the alias). Auto-select never yields an alias.
+- **One hop, no recursion** — an alias value is sniffed as path or stem, never as another alias.
+- **Broken-alias errors name the alias** (`ValueError` from `find()`, caught by CLI alongside `VMCtlError`): path-shaped but missing ⇒ `alias 'dev' points to missing .vmx: <path>`; name-shaped but unresolvable ⇒ `alias 'dev' -> 'foo': VM not found`.
 
 ## CLI VM selection (optional VM name)
 
-Every command that operates on a VM takes the VM **name** as its first positional
-argument. The name may be **omitted** to auto-select the single running VM:
+Every VM command takes the VM **name** as its first positional, which may be **omitted** to auto-select the single running VM. Use a leading `--` only when other positionals follow, so the first remaining token isn't read as the name.
 
-> **Omit the name; use a leading `--` only when other positionals follow**, so the
-> first remaining token isn't mistaken for the name.
-
-| Command shape | Explicit | Auto-select single running VM |
+| Command shape | Explicit | Auto-select |
 |---|---|---|
-| Name-only (`power state`, `network ip`, `tools query`, …) | `power state myvm` | `power state` (bare) |
-| Extra positionals (`snapshot take`, `guest copy-to`, …) | `snapshot take myvm s1` | `snapshot take -- s1` |
-| Variadic (`guest run`) | `guest run myvm cmd.exe /c echo hi` | `guest run -- cmd.exe /c echo hi` |
+| Name-only (`power state`, `network ip`, …) | `power state myvm` | `power state` |
+| Extra positionals (`snapshot take`, `guest copy-to`) | `snapshot take myvm s1` | `snapshot take -- s1` |
+| Variadic (`guest run`) | `guest run myvm cmd /c hi` | `guest run -- cmd /c hi` |
 
-Rules and rationale:
-
-- **Trigger = exactly one *running* VM in scope** — counted from `vmrun list`
-  intersected with the registry (scan roots). Out-of-scope running VMs are
-  ignored for both the count and selection (they can't be named via vmctl
-  anyway). So the resolved VM always has a **name** — but *not* necessarily
-  registered credentials: auto-select guarantees identity, not that
-  `auth set` was ever run for that VM. Credential-dependent commands (e.g.
-  `sync`/`push`) must tolerate an empty cred dict (see **File sync via sss**).
-- **Targets that are off by nature can't auto-select.** Because the trigger is a
-  *running* VM, `power start`, `clone`, and offline `snapshot revert` rarely
-  match — intended, not a bug.
-- **Scope = all VM-operating commands except `vm list` (no name) and
-  `auth set`** (a config write keyed by name, not an op on a live VM).
-- **The leading `--` is a custom marker, not Click's option terminator.** Click
-  natively consumes `--` and shifts nothing, so the CLI intercepts it: if the
-  first token after the subcommand is `--`, it is stripped, the VM is
-  auto-resolved, and the rest is handed to Click. Only the *leading* `--` is
-  special, so later flags still parse (`snapshot take -- s1 --memory` → `--memory`
-  is still a flag). A `--` anywhere but first keeps its conventional meaning.
-- **No silent count-based fill.** `snapshot take myvm` (forgetting the snap name)
-  is a clean "missing argument" error — `myvm` is the name, never reinterpreted
-  as the snap name. Count-based omission and its wrong-VM footgun were
-  deliberately rejected.
-- **Every result carries a `vm` key** — typed or auto-selected — for a uniform,
-  predictable output shape (`{"vm": "<name>", …}`). The name is the canonical
-  registry name. (Existing exact-match unit tests must be updated for this.)
-- **Reverse-mapping** a running `.vmx` back to its name (for credential lookup)
-  inverts the registry **case-insensitively / path-normalized**, since
-  `vmrun list` and `rglob` paths may differ.
-- **Failure modes:** zero running in scope → `no running VM to auto-select; pass
-  a name`; two or more → error listing them, `pass a name`.
+- **Trigger = exactly one *running* VM in scope** — `vmrun list` ∩ registry. Out-of-scope running VMs are ignored. So the resolved VM always has a **name** but not necessarily stored credentials; cred-dependent commands (`sync`/`push`) must tolerate an empty cred dict.
+- **Off-by-nature targets can't auto-select** — `power start`, `clone`, offline `snapshot revert` rarely match the running-VM trigger (intended).
+- **Scope** = all VM-operating commands except `vm list` and `auth set` (a config write keyed by name).
+- **Leading `--` is a custom marker, not Click's terminator.** If the first token after the subcommand is `--`, the CLI strips it, auto-resolves, and hands the rest to Click. Only the *leading* `--` is special (`snapshot take -- s1 --memory` still parses `--memory`).
+- **No silent count-based fill** — `snapshot take myvm` (forgot snap name) is a clean missing-argument error; `myvm` is never reinterpreted.
+- **Every result carries a `vm` key** (canonical registry name) for uniform output `{"vm": "<name>", …}`.
+- **Reverse-mapping** a running `.vmx` to its name (for cred lookup) inverts the registry case-insensitively / path-normalized.
+- **Failure modes:** zero running → `no running VM to auto-select; pass a name`; ≥2 → error listing them, `pass a name`.
 
 ## CLI short forms — option flags (ADR-0005)
 
-The CLI is no longer long-form-only: options carry short flags.
+Options carry short flags. **Short flags are command-scoped mnemonics, not a global letter map** — Click resolves them per command; the only rule is within-command uniqueness. Each option takes the clearest *local* mnemonic, preferring Unix convention (`fs mkdir -p`=`--parents`, `fs rmdir -r`=`--recursive`). The same letter varies by command — `-d` is `--description`/`--dir`/`--project-dir`; `-p` is `--password`/`--parents`/`--prefix`. **Per-command `--help` is the source of truth.** Soft convention: where a command takes credentials, `-u`/`-p` = user/password.
 
-- **Short option flags are command-scoped mnemonics, not a global letter map.**
-  Click resolves short flags per command, so the only rule is within-command
-  uniqueness. Each option takes the clearest *local* mnemonic, preferring Unix
-  convention (`fs mkdir -p` = `--parents`, `fs rmdir -r` = `--recursive`). The
-  same letter therefore varies by command — `-d` is `--description`
-  (`snapshot take`), `--dir` (`fs mktemp`), `--project-dir` (`sync`); `-p` is
-  `--password` (`auth`/`sync`/`push`) but `--parents` (`fs mkdir`) and
-  `--prefix` (`fs mktemp`). **Per-command `--help` is the source of truth** —
-  short flags are deliberately *not* portable across commands. The only soft
-  convention: where a command takes credentials, `-u`/`-p` = user/password.
+## snapshot revert lifecycle (ADR-0002)
 
-## snapshot revert lifecycle
+`snapshot revert` is a lifecycle macro, not a bare vmcli call: vmcli `Snapshot Revert` **errors while the VM is online** (running/paused) but tolerates off/suspended. The snapshot name is **resolved/validated first**, so a typo never powers off the VM.
 
-`snapshot revert` is a lifecycle macro, not a bare vmcli call, because vmcli
-`Snapshot Revert` **errors while the VM is "online"** (running/paused) but
-tolerates **off or suspended** (see `tests/INTEGRATION.md`). The name is always
-**resolved/validated first**, so a typo'd snapshot name never powers off the VM.
-
-**Library `SnapshotModule.revert(name)` — restores prior power state:**
+`SnapshotModule.revert(name)` restores prior power state:
 
 | Prior state | Action |
 |---|---|
@@ -141,246 +59,115 @@ tolerates **off or suspended** (see `tests/INTEGRATION.md`). The name is always
 | Suspended | revert only (stays suspended) |
 | Off | revert only (stays off) |
 
-- **Hard stop, not soft.** Revert discards the running state anyway, so a
-  graceful guest shutdown is wasted effort (and can hang without Tools).
-- This **overturns the earlier "library stays faithful to the must-be-off
-  constraint" rule** (project finding #15): the library now owns the
-  stop/revert/restore lifecycle. `revert(name, ensure_running=True)` forces a
-  start regardless of prior state (used by the CLI below).
+- **Hard stop, not soft** — revert discards running state anyway; a graceful shutdown is wasted and can hang without Tools.
+- Overturns the earlier "library stays faithful to must-be-off" rule: the library now owns the stop/revert/restore lifecycle. `revert(name, ensure_running=True)` forces a start regardless of prior state.
+- **CLI `vmctl snapshot revert` always ends running** (suspended→resume, off→cold boot) via `revert(..., ensure_running=True)`.
 
-**CLI `vmctl snapshot revert` — always ends running:** after the revert it
-ensures the VM is started regardless of prior state (suspended → resume, off →
-cold boot). Implemented via `revert(..., ensure_running=True)`.
+## vmcli vs vmrun
 
-## Flagged ambiguities
+**"query" does not imply vmcli.** The rule is:
 
-**"query" does not imply vmcli.** The earlier shorthand "queries go through vmcli, mutations through vmrun" is wrong as a general rule. The actual convention is:
+> Use `vmcli` where it works; fall back to `vmrun` where vmcli has no equivalent or is broken.
 
-> Use `vmcli` where it works; fall back to `vmrun` where `vmcli` has no equivalent or is broken.
+Both reads and writes use vmrun when vmcli can't serve them: `power.state()` reads via vmcli but all power *mutations* use vmrun (vmcli `Power Start` needs `__vmware__`-group/admin); `vars.read()`/`write()` both use vmrun (no vmcli variable namespace); `network.ip()` reads via vmrun because `vmcli Ethernet query` returns only adapter config, never the guest IP.
 
-Both *reads* and *writes* use `vmrun` when vmcli can't serve them:
-- `power.state()` reads via vmcli; all power *mutations* use vmrun (vmcli `Power Start` needs `__vmware__`-group/admin).
-- `vars.read()`/`vars.write()` both use vmrun (no vmcli variable namespace).
-- `network.ip()` reads via vmrun — `vmcli Ethernet query` only returns **adapter config**, never the **guest IP**. This is *not* an exception to the rule; it is the rule.
-
-## network.ip() contract (verified live against `vmctl`, 2026-06-22)
+## network.ip() contract (verified live, 2026-06-22)
 
 `network.ip()` → `vmrun -T ws getGuestIPAddress <vmx>` (no `-wait`), returns `{"ip": <str>}`.
 
-| VM state | vmrun exit | `network.ip()` result |
+| VM state | vmrun exit | Result |
 |---|---|---|
 | Running, IP assigned | 0 (~0.6s) | `{"ip": "192.168.x.x"}` |
-| Running, no IP yet (DHCP pending / no Tools) | 0 | `{"ip": ""}` — empty, does not raise |
-| Suspended | 0 | `{"ip": "<stale last-known IP>"}` — see **Stale guest IP** |
-| Powered off | 127, `Error: ...not powered on` on **stdout** | raises `VMCtlError` (Runner falls back to stdout for the message) |
+| Running, no IP yet | 0 | `{"ip": ""}` — empty, no raise |
+| Suspended | 0 | `{"ip": "<stale IP>"}` — see Stale guest IP |
+| Powered off | 127, error on stdout | raises `VMCtlError` |
 
-- No guest credentials required (host-side `guestInfo` read, unlike `guestEnv`).
-- `-wait` (block until an IP exists) is intentionally **not** exposed — it can hang indefinitely; callers poll instead.
-- `-snapshot=` is irrelevant to a live query and ignored.
-
-**Resume wedges the VIX channel — `ip()` falls back to `guestinfo.ip`.** After
-resuming a *suspended / memory snapshot*, `vmrun getGuestIPAddress` can fail with
-`Error: The VMware Tools are not running in the virtual machine` for the **entire
-resumed session**, even though Tools are fully up (vmcli `Tools Query` reports
-`running: true`, guest ops work) and the guest is networked. `getGuestIPAddress`
-gates on a VIX Tools **heartbeat** that the resume leaves wedged; only a guest
-**reboot** re-establishes it (restarting the in-guest Tools service does not).
-Because `getGuestIPAddress` is effectively `guestinfo.ip` **plus** that heartbeat
-gate, `ip()` catches the "not running" failure and falls back to
-`vmrun readVariable <vmx> guestVar ip` (host-side `guestinfo.ip`, no heartbeat
-gate, no guest creds). The fallback fires **only** on a "not running" message —
-"not powered on" still raises, so a genuinely-off VM is never masked. If the
-cached `guestinfo.ip` is also empty, the original error is re-raised. (Verified
-live against `vmctl`, 2026-06-25.)
+- No guest credentials required (host-side `guestInfo` read).
+- `-wait` intentionally **not** exposed (can hang forever; callers poll). `-snapshot=` irrelevant and ignored.
+- **Resume wedges the VIX channel — falls back to `guestinfo.ip`.** After resuming a suspended/memory snapshot, `getGuestIPAddress` can fail with `The VMware Tools are not running` for the **whole resumed session** even though Tools are up (it gates on a VIX heartbeat the resume leaves wedged; only a guest **reboot** fixes it). Since `getGuestIPAddress` ≈ `guestinfo.ip` + heartbeat gate, `ip()` catches the "not running" failure and falls back to `vmrun readVariable <vmx> guestVar ip` (no heartbeat, no creds). Fires **only** on "not running" — "not powered on" still raises, so an off VM is never masked. If cached `guestinfo.ip` is also empty, the original error re-raises. (Verified 2026-06-25.)
 
 ## Guest file copy (`guest.copy_to` / `guest.copy_from`)
 
-`vmcli Guest copyTo/copyFrom` require `<toPath>` to be a full **file** path. Verified live
-against `vmctl` (which now has Tools):
+`vmcli Guest copyTo/copyFrom` require `<toPath>` to be a full **file** path.
 
-- **Directory destinations are rejected.** Any path that resolves to an existing directory —
-  `C:\`, `C:\Users`, bare `C:` — fails with `The object is not a file`. It is a guest-side
-  stat, not a path-string check (`C:\Users` with no trailing separator fails too). vmctl
-  applies cp/scp semantics for the *explicit* directory forms (trailing `\`/`/`, or bare
-  drive root) by appending the source basename; an existing directory given without a
-  trailing separator can't be detected locally and instead raises an actionable `VMCtlError`.
-- **"The object is not a file" is direction-sensitive.** For `copy_to` the directory is the
-  guest **destination**; for `copy_from` it is the guest **source**. `copy_from` to an
-  existing *host* directory reports `File already exists`, not `not a file`.
-- **Large files fail — `copy_to` is small-files-by-design.** Threshold pinned live:
-  **≤60 KB copies fine, ≥64 KB fails** with the opaque `Unknown error` and the file does
-  **not** land in the guest; the wall sits in the (60 KB, 64 KB] gray zone. Sub-threshold
-  files copy fine to any writable location (incl. `C:\` root — it is *not* a permission
-  issue). This is a `vmcli`/Tools limitation, not a vmctl bug. To avoid a silent mid-flight
-  failure, `guest.copy_to` **refuses up front** any file larger than
-  `_COPY_TO_MAX_BYTES = 60 * 1024` (the highest proven-good size) with an actionable
-  `VMCtlError` naming the alternatives; it does not call vmcli in that case. If the host
-  file can't be stat'd (e.g. it doesn't exist) the size check is skipped so unrelated errors
-  surface unchanged. **For large transfers (e.g. an installer MSI), use an HGFS shared
-  folder** (`shares add`) or attach the file as an ISO (`peripheral mount-iso`) instead of
-  `guest copy-to`. Large-file transfer is intentionally **not** a feature of this command.
-- **No programmatic copy-paste / drag-and-drop.** The VMware GUI host↔guest file
-  copy-paste / DnD that "just works" has **no CLI/API/RPC** — it is a GUI-only feature of
-  Workstation + `vmtoolsd -n vmusr` riding the CP/DnD backdoor channel, which neither
-  `vmcli` nor `vmrun` can drive (open-vm-tools `dndcp` is an unofficial, versioned binary
-  GuestRPC protocol; `vmware-rpctool` only does `guestinfo`). Broadcom docs also restrict
-  GUI copy-paste to text/images <4 MB, not files between VMs. Do not re-investigate wiring
-  it into vmctl. Note: the `clipboard` module (see `vmctl/modules/clipboard.py`) handles the
-  **text clipboard** only — it is unrelated to host↔guest file paste.
+- **Directory destinations are rejected** — `C:\`, `C:\Users`, bare `C:` fail with `The object is not a file` (a guest-side stat, not a string check). vmctl applies cp/scp semantics for *explicit* directory forms (trailing `\`/`/`, or bare drive root) by appending the source basename; an existing dir given without a trailing separator can't be detected locally and raises an actionable `VMCtlError`.
+- **Direction-sensitive** — for `copy_to` the dir is the guest **dest**; for `copy_from` the guest **source**. `copy_from` to an existing *host* dir reports `File already exists`, not `not a file`.
+- **Large files fail — small-files-by-design.** Pinned live: **≤60 KB OK, ≥64 KB fails** with opaque `Unknown error` and the file doesn't land (gray zone in (60 KB, 64 KB]). Not a permission issue. `guest.copy_to` **refuses up front** any file > `_COPY_TO_MAX_BYTES = 60*1024` with an actionable error; it doesn't call vmcli. If the host file can't be stat'd, the size check is skipped. **For large transfers use an HGFS share** (`shares add`) **or an ISO** (`peripheral mount-iso`).
+- **No programmatic copy-paste / drag-and-drop.** The GUI host↔guest file CP/DnD has **no CLI/API/RPC** — it's a GUI-only feature of Workstation + `vmtoolsd -n vmusr` on the CP/DnD backdoor channel, undrivable by vmcli/vmrun. Do not re-investigate. The `clipboard` module handles **text only**, unrelated to file paste.
 
-## File sync via sss (vmctl → sss)
+## clipboard text (push / pull)
 
-vmctl **depends on** `sss` (embedded as the `./sss` git submodule) and inherits
-file-sync by composition — the inverse of the original direction (see
-[docs/adr/0003](docs/adr/0003-depend-on-sss-for-file-sync.md) and sss's
-[ADR-0004](sss/docs/adr/0004-standalone-no-vm-coupling.md)). sss is
-target-agnostic and knows nothing about VMs; vmctl resolves the VM and feeds it a
-host + credentials.
+The `clipboard` module round-trips the **guest text clipboard** by staging a temp file via `Guest copyTo`/`copyFrom` and driving the native tool: Windows pushes via `clip.exe`, pulls via `powershell Get-Clipboard`; Linux uses `xclip`. Guest OS sniffed once via `ConfigParams query` (`guestOS`), with a `guest_os_fn` injection seam for tests.
 
-The seam is **`vm.sync`** (a `SyncModule`), surfaced on the CLI as **`vmctl sync`**
-and **`vmctl push`** only (the full sss verb set is not mirrored):
+- **Windows pull is `--noWait` + poll, not synchronous** — vmcli's synchronous wait returns before the nested `cmd → powershell` grandchild finishes, so the read fires `--noWait` and its artifact file is polled (`_poll_guest_file`, bounded by `_PULL_POLL_TIMEOUT_S`); on timeout returns `""`. Push uses `clip.exe` as a **direct** child of cmd, so a waited run reliably sets the clipboard before return.
+- **`clipboard push` lone-token case.** Both positionals (`name`, `text`) are optional, so `clipboard push hello` binds `hello` to the **VM name**. We don't silently reinterpret it (would violate *no silent fill*). It raises an actionable error naming the three working forms:
+  - **pipe:** `echo hello | vmctl clipboard push` (text omitted ⇒ non-tty stdin read; no `--` needed with no trailing positional),
+  - **leading `--`:** `vmctl clipboard push -- hello` (the `--` fills the name slot),
+  - **name explicitly:** `vmctl clipboard push myvm hello`.
+- **Only command with this ambiguity** — an audit found `clipboard push` is the sole command with two optional positionals (caused by the piped-stdin feature making `text` optional); every other command makes non-name positionals required. The empty-text guard, stdin read, and disambiguation live in the **CLI** (`clipboard_push`), not the module; an explicit `text` arg always wins over stdin.
 
-- `vm.sync.run(sync_optional=False, project_dir=None)` — full profile lifecycle
-  (`pre_sync` → sync → `post_sync`). The profile auto-selects from
-  `project_dir`'s git remote in `~/.sss/config.json`. **Build-config/arch are not
-  vmctl flags** — `{build_cfg}`/`{arch}` substitution comes from the profile's own
-  `variables` block; `vmctl sync` exposes only `--optional` and `--project-dir`.
-  (`profile`/`base_dir` kwargs exist as a test-injection seam.)
+## File sync via sss (ADR-0003)
+
+vmctl **depends on** `sss` (the `./sss` git submodule) and inherits file-sync by composition — the inverse of the original direction (see ADR-0003 and sss ADR-0004). sss is target-agnostic and knows nothing about VMs; vmctl resolves the VM and feeds it a host + credentials.
+
+The seam is **`vm.sync`** (a `SyncModule`), surfaced as **`vmctl sync`** and **`vmctl push`** only:
+
+- `vm.sync.run(sync_optional=False, project_dir=None)` — full profile lifecycle (`pre_sync` → sync → `post_sync`). Profile auto-selects from `project_dir`'s git remote in `~/.sss/config.json`. **Build-config/arch are not vmctl flags** — `{build_cfg}`/`{arch}` come from the profile's `variables` block; `vmctl sync` exposes only `--optional` and `--project-dir`. (`profile`/`base_dir` kwargs are a test seam.)
 - `vm.sync.push(source, dest)` — ad-hoc, profile-less transfer.
 
-**The IP is read once; sync never boots the VM.** `SyncModule` requires
-`PowerState == "on"` and a non-empty `network.ip()`, else it raises an actionable
-`VMCtlError` (a suspended VM's IP is **stale**, a powered-off VM has none, and a
-just-booted VM has no lease yet — see **Guest IP** / **Stale guest IP** above).
-This deliberately does **not** follow the `snapshot revert` lifecycle-ownership
-precedent (it does not wait or boot) — the caller readies the guest.
-The `import sss` is **lazy** (VM commands work without sss/paramiko installed)
-and `SssError` is wrapped as `VMCtlError` so the CLI surface stays uniform.
+- **IP read once; sync never boots the VM.** `SyncModule` requires `PowerState == "on"` and non-empty `network.ip()`, else an actionable `VMCtlError` (suspended IP is stale, off has none, just-booted has no lease). Deliberately does **not** follow the snapshot-revert lifecycle-ownership precedent — the caller readies the guest. `import sss` is **lazy** (VM commands work without sss/paramiko) and `SssError` wraps to `VMCtlError`.
+- **Credential resolution — stored, with optional inline override.** By default both reuse the VM's stored guest creds from `~/.vmctl/config.json`. `sync`/`push` also accept `-u`/`--user` + `-p`/`--password` under a **both-or-neither** rule: both ⇒ the pair fully replaces stored creds for that run; neither ⇒ stored creds; exactly one ⇒ clean `VMCtlError`. **No field-mixing.** Override is **runtime-only, never persisted** (`auth set` is the sole config writer).
+- If no creds resolve, `user`/`password` stay `None` and sss still attempts **publickey/agent** auth (keyless preserved). A password-less `Authentication failed` from sss is caught and re-wrapped with an actionable hint (use `auth set` or pass `--user`/`--password`).
+- Resolution, the both-or-neither check, and catch-and-rewrap all live in **`SyncModule`** (CLI just declares options), so they're unit-testable without Click or real sss.
 
-**Credential resolution (stored, with an optional inline override).** By default
-both commands reuse the VM's stored guest credentials from
-`~/.vmctl/config.json` as the SSH login. `sync` and `push` also accept an inline
-override — `-u`/`--user` and `-p`/`--password` — governed by a **both-or-neither**
-rule: pass *both* and the pair **fully replaces** the stored creds for that run;
-pass *neither* and the stored creds are used; passing exactly one is a clean
-`VMCtlError` ("provide both `--user` and `--password`, or neither"). There is **no
-field-mixing** (CLI user + stored password). The override is **runtime-only and
-never persisted** — `auth set` remains the sole writer of the config.
-
-If no usable credentials resolve (none stored, none passed), `user`/`password`
-stay `None` and sss still attempts **publickey/agent** auth — keyless auth into
-the guest is preserved, *not* blocked by a hard preflight. But a password-less
-`Authentication failed` from sss is **caught and re-wrapped** with an actionable
-hint (register creds via `auth set`, or pass `--user`/`--password`), replacing the
-opaque `SSH connection to None@<ip> failed` message.
-
-Resolution, the both-or-neither check, and the catch-and-rewrap all live in
-**`SyncModule`** (the CLI just declares the options and passes them down), so they
-are unit-testable without Click or a real sss — per the library-owns-logic
-convention used by `peripheral`.
-
-> Short flags `-u`/`-p` here are command-scoped (user/password). The repo-wide
-> short-form convention this change originally deferred has since been taken on —
-> per-command mnemonic flags; see **CLI short forms** above and **ADR-0005**. The
-> collision worry (`-p`/`-d`/`-o` reused across commands) is moot because Click
-> scopes short flags per command.
-
-### Two file-into-guest paths (do not confuse them)
-
-vmctl now has two ways to put a file in the guest, with **opposite** dest and
-size rules — pick by transport availability and file size:
+### Two file-into-guest paths (opposite dest and size rules)
 
 | | `guest copy-to` | `push` (sss / SSH) |
 |---|---|---|
-| Channel | `vmcli Guest copyTo` (VMware Tools) | SSH / SFTP (needs sshd in guest) |
-| Dest arg | a full **file** path — a directory is rejected (`not a file`) | a remote **directory** — file lands at `dest/<basename>` |
-| Size | **≤ 60 KB** (refused above; vmcli fails silently) | unbounded |
+| Channel | `vmcli Guest copyTo` (Tools) | SSH / SFTP (needs sshd) |
+| Dest arg | full **file** path — dir rejected | remote **directory** — lands at `dest/<basename>` |
+| Size | **≤ 60 KB** (refused above) | unbounded |
 | Needs | Tools running | OpenSSH server + reachable guest IP |
 
-So a `dest` that works for `push` (a directory) is rejected by `copy-to`, and a
-file too big for `copy-to` is exactly what `push` is for. Command help strings
-cross-reference each other.
+A `dest` that works for `push` (a directory) is rejected by `copy-to`; a file too big for `copy-to` is exactly what `push` is for. Help strings cross-reference each other.
 
-## peripheral devices (unified connect/disconnect)
+## peripheral devices (ADR-0004, unified connect/disconnect)
 
-`peripheral` was 9 verbs (`connect-disk`/`disconnect-disk`/`connect-serial`/
-`disconnect-serial`/`connect-usb`/`disconnect-usb`/`eject`/`mount-iso`/`list`).
-It is now **4**: `list`, `connect`, `disconnect`, `mount-iso` (see
-[docs/adr/0004](docs/adr/0004-unified-peripheral-connect-via-list.md)).
+`peripheral` went from 9 verbs to **4**: `list`, `connect`, `disconnect`, `mount-iso`.
 
-**Device id**:
-The *native* identifier of a connectable device, exactly as VMware names it — the
-**vmcli label** for disks/serial (`sata0:1`, `nvme0:0`, `serial0`) and the
-**named-device string** for USB. The id you see in `list` is the id you type into
-`connect`/`disconnect`. There is **no synthesized/friendly id** layered on top.
-_Avoid_: "device name" alone (ambiguous between the vmcli label and the USB
-named-device string).
-
-**Device type**:
-One of `disk`, `cdrom`, `serial`, `usb`. Derived, not typed by the user:
-`cdrom` vs `disk` comes from the backing (`cdrom_image` ⇒ `cdrom`). `type` is
-what `connect`/`disconnect` dispatch on, and what tells you a device is a `cdrom`
-(the only type `mount-iso` targets).
+- **Device id** — the *native* identifier exactly as VMware names it: the **vmcli label** for disks/serial (`sata0:1`, `nvme0:0`, `serial0`), the **named-device string** for USB. The id in `list` is the id you type into `connect`/`disconnect`. No synthesized/friendly id. _Avoid_: "device name" alone.
+- **Device type** — one of `disk`, `cdrom`, `serial`, `usb`. Derived, not user-typed: `cdrom` vs `disk` from the backing (`cdrom_image` ⇒ `cdrom`). `type` is what `connect`/`disconnect` dispatch on and what marks a `cdrom` (the only type `mount-iso` targets).
 
 ### `list` is the contract backbone
 
-`peripheral.list()` returns a **flat, uniform** inventory — one schema per device:
+`peripheral.list()` returns a **flat, uniform** inventory, one schema per device:
 
 ```
 {"vm": "<name>", "devices": [
   {"id": "sata0:1", "type": "cdrom",  "connected": true,  "backing": "foo.iso"},
   {"id": "serial0", "type": "serial", "connected": false, "backing": ...},
-  {"id": "<usb name>", "type": "usb", "connected": true,  "backing": ...}
-]}
+  {"id": "<usb name>", "type": "usb", "connected": true,  "backing": ...}]}
 ```
 
-This replaces the old grouped `{"disks", "serial"}` (which omitted USB entirely).
-Disks/serial come from `vmcli Disk query` / `Serial Query`; **USB entries come
-from the `.vmx` named-device config** — there is **no vmcli/vmrun verb that
-enumerates connectable *host* hardware**, so "available devices from host" means
-"devices the VM knows about and can connect," not a live host-USB probe.
+Replaces the old grouped `{"disks","serial"}` (which omitted USB). Disks/serial from `vmcli Disk query` / `Serial Query`; **USB from the `.vmx` named-device config** — there's no vmcli/vmrun verb that enumerates connectable *host* hardware, so "available" means "devices the VM knows about," not a live host-USB probe.
 
-> ⚠️ **Verify live at implementation:** the exact `.vmx` key(s) and the precise
-> name string that `vmrun connectNamedDevice` accepts for a USB device, and
-> whether a USB device's `connected` state is readable from the `.vmx`. These are
-> the only pieces not confirmable from the tools' help alone.
+> ⚠️ **Verify live at implementation:** exact `.vmx` key(s) and the precise name string `vmrun connectNamedDevice` accepts for USB, and whether USB `connected` state is readable from `.vmx`.
 
 ### connect/disconnect resolve id → type via `list`
 
-`connect(id)`/`disconnect(id)` call `self.list()`, find the entry whose `id`
-exactly matches, read its `type`, and dispatch to a private helper. The user sees
-**one id namespace**; the per-type backend split is hidden.
+`connect(id)`/`disconnect(id)` call `self.list()`, match the entry by exact `id`, read its `type`, dispatch to a private helper. One id namespace; the per-type split is hidden.
 
-- **Zero matches** → actionable error listing the valid ids.
-- **Id collides across types** → **hard error** asking to disambiguate (no
-  priority order baked in). Collision is near-impossible given the distinct
-  native namespaces, but the resolver must not silently pick one.
-- Resolution + dispatch + error modes live in the **library** (`PeripheralModule`),
-  not the CLI, so they are unit-testable without Click. The old public typed
-  methods (`connect_disk`, `connect_usb`, …) are **removed** in favour of private
-  `_connect_disk`/`_connect_serial`/`_connect_usb` helpers.
+- **Zero matches** → actionable error listing valid ids.
+- **Id collides across types** → **hard error** to disambiguate (no baked priority). Near-impossible given distinct namespaces, but the resolver must not silently pick.
+- Resolution + dispatch + errors live in the **library** (`PeripheralModule`), unit-testable without Click. Old public typed methods (`connect_disk`, …) removed in favor of private `_connect_disk`/`_connect_serial`/`_connect_usb`.
 
 ### Backend stays split (dispatch by type)
 
 | type | backend | id |
 |---|---|---|
-| disk / serial / cdrom | `vmcli ... ConnectionControl <label> connect|disconnect` | vmcli label |
+| disk / serial / cdrom | `vmcli … ConnectionControl <label> connect\|disconnect` | vmcli label |
 | usb | `vmrun connectNamedDevice` / `disconnectNamedDevice <name>` | named-device string |
 
-`vmrun connectNamedDevice` is **not** USB-specific — it connects any named VMX
-device — so converging *all* dispatch onto it is tempting. We **kept the split**:
-vmcli supplies the `connected` state `list` depends on and likely works while the
-VM is off, whereas `connectNamedDevice` typically needs the VM running.
-Collapsing onto `connectNamedDevice` is a **logged follow-up to verify live**, not
-part of this change.
+`vmrun connectNamedDevice` is not USB-specific (connects any named VMX device), so converging all dispatch onto it is tempting — but we **kept the split**: vmcli supplies the `connected` state `list` needs and likely works while off, whereas `connectNamedDevice` typically needs the VM running. Collapsing is a **logged follow-up to verify live**.
 
-`mount-iso <id> <iso>` is kept separate because it rebinds the device **backing**
-(sets the ISO path) and *then* connects — something plain `connect` cannot do.
-`eject` was dropped: it was exactly `disconnect <cdrom-id>`.
-
-## Example dialogue
-
-> **Dev:** The `network` command already lists the NIC — why add `ip`?
-> **Expert:** `network list` gives you the **adapter config** — connection type, MAC, the network it's wired to. That's static `.vmx` data; it's there even when the VM is off. It never tells you the **guest IP**.
-> **Dev:** So `network ip` asks the guest?
-> **Expert:** It reads `guestInfo` through `vmrun`. Running with an address → you get it. Booting but no lease yet → empty string, not an error. Powered off → it raises. And watch out for a **suspended** VM: it hands back the last IP it saw, which may be a lie after resume.
+`mount-iso <id> <iso>` is separate because it rebinds the device **backing** (sets the ISO path) *then* connects — something plain `connect` can't do. `eject` was dropped (it was exactly `disconnect <cdrom-id>`).
