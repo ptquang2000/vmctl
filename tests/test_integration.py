@@ -412,15 +412,15 @@ def test_sync_push_lands_file(guest_vm):
 
 
 def test_sync_lifecycle_injected_profile(guest_vm):
-    """``vm.sync.run`` with an injected throwaway Profile + base_dir (touches no
-    real ~/.sss/config.json); assert the mapped file landed in the guest."""
+    """``vm.sync.run`` with an injected throwaway Profile + project_dir (touches
+    no real ~/.sss/config.json); assert the mapped file landed in the guest."""
     _require_sshd(guest_vm)
     from sss import Profile
 
     payload = "lifecycle-mapped-file-9"
-    base_dir = tempfile.mkdtemp()
+    project_dir = tempfile.mkdtemp()
     src_name = "mapped.txt"
-    with open(os.path.join(base_dir, src_name), "w", encoding="utf-8") as f:
+    with open(os.path.join(project_dir, src_name), "w", encoding="utf-8") as f:
         f.write(payload)
     dest_dir = SYNC_DIR + r"\lifecycle"
     profile = Profile(name="test-injected", source_files={src_name: dest_dir})
@@ -428,15 +428,15 @@ def test_sync_lifecycle_injected_profile(guest_vm):
     with tempfile.NamedTemporaryFile(suffix=".txt", delete=False) as f:
         host_out = f.name
     try:
-        result = guest_vm.sync.run(profile=profile, base_dir=base_dir)
+        result = guest_vm.sync.run(profile=profile, project_dir=project_dir)
         assert result["sync"]["uploaded_count"] >= 1
         guest_vm.guest.copy_from(rf"{dest_dir}\{src_name}", host_out, overwrite=True)
         with open(host_out, encoding="utf-8", errors="replace") as f:
             content = f.read()
     finally:
         os.unlink(host_out)
-        os.unlink(os.path.join(base_dir, src_name))
-        os.rmdir(base_dir)
+        os.unlink(os.path.join(project_dir, src_name))
+        os.rmdir(project_dir)
     assert content.strip() == payload
 
 
@@ -694,7 +694,7 @@ def test_sss_sync_uploads_then_skips(session, sandbox, tmp_path):
 
     dest = sandbox["dir"] + "/synced"
     profile = Profile("it-sync", source_dirs={"payload": [dest]})
-    engine = SyncEngine(base_dir=str(tmp_path))
+    engine = SyncEngine(project_dir=str(tmp_path))
 
     first = engine.run(profile, session._conn)
     assert any("hello.txt" in u for u in first.uploaded)
@@ -828,7 +828,7 @@ def test_sss_run_lifecycle_in_sandbox(session, sandbox, tmp_path):
 
     The real BarApp profile never runs: this profile's every step stays inside
     the scratch dir. Built on the live connection via a fresh ``Sss`` so its
-    sync base_dir points at the local payload.
+    sync project_dir points at the local payload.
     """
     src = tmp_path / "life"
     src.mkdir()
@@ -844,7 +844,7 @@ def test_sss_run_lifecycle_in_sandbox(session, sandbox, tmp_path):
         post_sync=[{"op": "exec", "args": {"cmd": f'echo post> "{_win(post_marker)}"'}}],
     )
 
-    lifecycle = Sss(session._conn, profile=profile, base_dir=str(tmp_path))
+    lifecycle = Sss(session._conn, profile=profile, project_dir=str(tmp_path))
     result = lifecycle.run_lifecycle()
 
     assert result["pre_sync"][0]["result"]["exit_code"] == 0

@@ -64,7 +64,7 @@ class SyncModule:
         return self._credentials.get("user"), self._credentials.get("password")
 
     def _connect(self, host: str, project_dir=None, profile=None,
-                 base_dir=None, log=None, user=None, password=None):
+                 log=None, user=None, password=None):
         # Lazy import so vmctl's VM commands work without sss/paramiko installed;
         # only sync/push need it. Wrap sss's error type so vmctl's CLI surface
         # stays uniform (its handlers catch VMCtlError/ValueError).
@@ -87,7 +87,6 @@ class SyncModule:
                 password=password,
                 project_dir=project_dir,
                 profile=profile,
-                base_dir=base_dir,
                 log=log,
             )
         except sss.SssError as e:
@@ -103,13 +102,14 @@ class SyncModule:
     # -- operations ---------------------------------------------------------
 
     def run(self, sync_optional: bool = False, project_dir=None,
-            profile=None, base_dir=None, log=None,
+            profile=None, log=None,
             user=None, password=None) -> dict:
         """Full profile lifecycle (pre_sync -> sync -> post_sync) into the guest.
 
-        The profile is auto-selected by ``project_dir``'s git remote (the
-        ``profile``/``base_dir`` kwargs are an explicit-injection seam used by
-        tests). Build-config/arch substitution comes from the profile's own
+        ``project_dir`` both auto-selects the profile by its git remote and roots
+        the profile's relative source paths (ADR-0005); the ``profile`` kwarg is
+        an explicit-injection seam used by tests. Build-config/arch substitution
+        comes from the profile's own
         ``variables`` in ``~/.sss/config.json`` -- vmctl passes no extra vars.
 
         ``user``/``password`` are an optional inline credential override (the
@@ -119,7 +119,7 @@ class SyncModule:
         host = self._resolve_host()
         sss, session = self._connect(
             host, project_dir=project_dir, profile=profile,
-            base_dir=base_dir, log=log, user=user, password=password,
+            log=log, user=user, password=password,
         )
         try:
             with session as s:

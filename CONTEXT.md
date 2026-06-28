@@ -136,7 +136,7 @@ vmctl **depends on** `sss` (the `./sss` git submodule) and inherits file-sync by
 
 The seam is **`vm.sync`** (a `SyncModule`), surfaced as **`vmctl sync`** and **`vmctl push`** only:
 
-- `vm.sync.run(sync_optional=False, project_dir=None)` — full profile lifecycle (`pre_sync` → sync → `post_sync`). Profile auto-selects from `project_dir`'s git remote in `~/.sss/config.json`. **Build-config/arch are not vmctl flags** — `{build_cfg}`/`{arch}` come from the profile's `variables` block; `vmctl sync` exposes only `--optional` and `--project-dir`. (`profile`/`base_dir` kwargs are a test seam.)
+- `vm.sync.run(sync_optional=False, project_dir=None)` — full profile lifecycle (`pre_sync` → sync → `post_sync`). Profile auto-selects from `project_dir`'s git remote in `~/.sss/config.json`. **Build-config/arch are not vmctl flags** — `{build_cfg}`/`{arch}` come from the profile's `variables` block; `vmctl sync` exposes only `--optional` and `--project-dir` (which both selects the profile and roots its relative source paths — see sss ADR-0005). (The `profile` kwarg is a test seam.)
 - `vm.sync.push(source, dest)` — ad-hoc, profile-less transfer.
 
 - **IP read once; sync never boots the VM.** `SyncModule` requires `PowerState == "on"` and non-empty `network.ip()`, else an actionable `VMCtlError` (suspended IP is stale, off has none, just-booted has no lease). Deliberately does **not** follow the snapshot-revert lifecycle-ownership precedent — the caller readies the guest. `import sss` is **lazy** (VM commands work without sss/paramiko) and `SssError` wraps to `VMCtlError`.
