@@ -90,6 +90,26 @@ class AliasedGroup(click.Group):
         _, cmd, rest = super().resolve_command(ctx, args)
         return (cmd.name if cmd else None), cmd, rest
 
+    def format_commands(self, ctx, formatter):
+        """Render the command list with each command's alias shown inline.
+
+        Aliases are kept out of ``list_commands`` (so they are not listed as
+        separate commands), but the help is more discoverable when the canonical
+        name carries its short form, e.g. ``snapshot (ss)``.
+        """
+        canon_to_alias = {canon: alias for alias, canon in _ALIASES.items()}
+        rows = []
+        for name in self.list_commands(ctx):
+            cmd = self.get_command(ctx, name)
+            if cmd is None or cmd.hidden:
+                continue
+            alias = canon_to_alias.get(name)
+            label = f"{name} ({alias})" if alias else name
+            rows.append((label, cmd.get_short_help_str()))
+        if rows:
+            with formatter.section("Commands"):
+                formatter.write_dl(rows)
+
 
 @click.group(cls=AliasedGroup)
 def cli():
@@ -102,8 +122,8 @@ def cli():
 
     The leading VM name is optional on VM commands: omit it to auto-select the
     single running in-scope VM. When other positionals follow, mark the omitted
-    name with a leading `--` (e.g. `snapshot commit -- nightly`). Short aliases:
-    ss=snapshot, net=network, dev=peripheral, in=inspect, re=restart, ex=exec.
+    name with a leading `--` (e.g. `snapshot commit -- nightly`). Commands with a
+    short alias show it in parentheses below (e.g. `snapshot (ss)`).
     """
     pass
 
