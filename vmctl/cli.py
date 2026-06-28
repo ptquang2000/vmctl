@@ -805,7 +805,20 @@ def clipboard_push(name, text):
         if text is None and not sys.stdin.isatty():
             text = sys.stdin.read()
         if not text:
-            _err("clipboard text is empty")
+            # Both positionals are optional, so a lone token binds to NAME, not
+            # TEXT. Rather than silently reinterpret it (rejected: see the
+            # "no silent count-based fill" rule), name what happened and point to
+            # the canonical forms. A real name here + no text is the footgun;
+            # an omitted/auto-selected name is just an empty push.
+            if name is not None and name != _AUTO:
+                _err(
+                    f"no clipboard text given -- '{name}' was read as the VM name. "
+                    f"To push literal text to the auto-selected VM use "
+                    f"`clipboard push -- {name}`, pipe it "
+                    f"(`... | clipboard push`), or name the VM explicitly "
+                    f"(`clipboard push <vm> <text>`)."
+                )
+            _err("clipboard text is empty (pipe it, or use `clipboard push -- TEXT`)")
         vm = _resolve(name)
         _out_vm(vm, vm.clipboard.push_text(text))
     except (VMCtlError, ValueError) as e:

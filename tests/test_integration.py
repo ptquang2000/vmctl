@@ -24,8 +24,11 @@ stdout, so tests write an artifact to a known guest path, copy it back to the
 host, and assert on the host-side content.
 """
 
+import json
 import os
 import socket
+import subprocess
+import sys
 import tempfile
 import time
 import uuid
@@ -446,6 +449,28 @@ def test_clipboard_roundtrip(clipboard_vm):
     clipboard_vm.clipboard.push_text("hello clipboard")
     result = clipboard_vm.clipboard.pull_text()
     assert result["text"].strip() == "hello clipboard"
+
+
+def test_clipboard_push_pipes_stdin_via_cli(clipboard_vm):
+    """Live end-to-end of the piped-stdin path: a real OS pipe into the actual
+    CLI (`echo <text> | vmctl clipboard push`) must land in the guest clipboard.
+
+    The unit tests stub stdin in-process via ``CliRunner(input=...)``; this proves
+    the real plumbing connects -- a child process with a genuine non-tty stdin,
+    real ``~/.vmctl`` config resolution, and the live guest. The name is omitted,
+    so the CLI auto-selects the single running VM (the booted ``vmctl``)."""
+    text = "piped via cli"
+    proc = subprocess.run(
+        [sys.executable, "-c", "import vmctl.cli as c; c.cli()", "clipboard", "push"],
+        input=text.encode("utf-8"),
+        capture_output=True,
+    )
+    assert proc.returncode == 0, proc.stderr.decode("utf-8", "replace")
+    payload = json.loads(proc.stdout.decode("utf-8"))
+    assert payload == {"vm": VM_NAME, "success": True}
+
+    result = clipboard_vm.clipboard.pull_text()
+    assert result["text"].strip() == text
 
 
 # --------------------------------------------------------------------------- #

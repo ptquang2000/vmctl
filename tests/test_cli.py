@@ -362,3 +362,75 @@ def test_clone_adds_vm_key_and_uses_canonical_name(run, monkeypatch):
     assert result.exit_code == 0
     assert payload["vm"] == "src"
     assert captured["ctl"].clone_calls == [("src", "dest", False)]
+
+
+# --------------------------------------------------------------------------- #
+# clipboard push: stdin / empty-text handling (commit 7796782)                #
+# --------------------------------------------------------------------------- #
+
+
+def test_clipboard_push_explicit_text(run):
+    result, payload = run(["clipboard", "push", "myvm", "hello world"])
+    assert result.exit_code == 0
+    assert payload["vm"] == "myvm"
+    assert payload["called"] == "push_text"
+    assert payload["args"] == ["hello world"]
+
+
+def test_clipboard_pull_auto_selects(run):
+    result, payload = run(["clipboard", "pull"], running=("box",))
+    assert result.exit_code == 0
+    assert payload["vm"] == "box"
+    assert payload["called"] == "pull_text"
+
+
+def test_clipboard_push_reads_piped_stdin(monkeypatch):
+    # Text positional omitted + piped (non-tty) stdin => stdin is the text.
+    monkeypatch.setattr(cli_mod, "VMCtl", lambda: FakeCtl(("box",)))
+    result = CliRunner().invoke(cli, ["clipboard", "push"], input="piped text")
+    payload = json.loads(result.output)
+    assert result.exit_code == 0
+    assert payload["vm"] == "box"  # name omitted => auto-selected
+    assert payload["args"] == ["piped text"]
+
+
+def test_clipboard_push_empty_stdin_errors(monkeypatch):
+    # No name, no text, empty stdin => plain empty-text error pointing at the fix.
+    monkeypatch.setattr(cli_mod, "VMCtl", lambda: FakeCtl(("box",)))
+    result = CliRunner().invoke(cli, ["clipboard", "push"])  # no input
+    payload = json.loads(result.output)
+    assert result.exit_code == 1
+    assert "clipboard text is empty" in payload["error"]
+    assert "push -- TEXT" in payload["error"]  # points to the canonical form
+
+
+def test_clipboard_push_lone_arg_gives_actionable_footgun_error(monkeypatch):
+    # FOOTGUN fix: a single token binds to NAME (not text). We do NOT silently
+    # reinterpret it (per the "no silent count-based fill" rule); instead we name
+    # what happened and point to `push -- hello` / pipe / explicit-name forms.
+    monkeypatch.setattr(cli_mod, "VMCtl", lambda: FakeCtl(("box",)))
+    result = CliRunner().invoke(cli, ["clipboard", "push", "hello"])  # no pipe
+    payload = json.loads(result.output)
+    assert result.exit_code == 1
+    err = payload["error"]
+    assert "'hello' was read as the VM name" in err
+    assert "clipboard push -- hello" in err  # the documented auto-select form
+
+
+def test_clipboard_push_dashdash_makes_lone_arg_text(run):
+    # The documented way to push literal text under auto-select: leading `--`.
+    result, payload = run(["clipboard", "push", "--", "hello"], running=("box",))
+    assert result.exit_code == 0
+    assert payload["vm"] == "box"
+    assert payload["args"] == ["hello"]
+
+
+def test_clipboard_push_explicit_text_ignores_stdin(monkeypatch):
+    # An explicit text arg wins; stdin is not consulted (text is not None).
+    monkeypatch.setattr(cli_mod, "VMCtl", lambda: FakeCtl(("box",)))
+    result = CliRunner().invoke(
+        cli, ["clipboard", "push", "myvm", "typed"], input="ignored")
+    payload = json.loads(result.output)
+    assert result.exit_code == 0
+    assert payload["vm"] == "myvm"
+    assert payload["args"] == ["typed"]
