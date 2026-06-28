@@ -47,21 +47,45 @@ Every VM command takes the VM **name** as its first positional, which may be **o
 
 Options carry short flags. **Short flags are command-scoped mnemonics, not a global letter map** — Click resolves them per command; the only rule is within-command uniqueness. Each option takes the clearest *local* mnemonic, preferring Unix convention (`fs mkdir -p`=`--parents`, `fs rmdir -r`=`--recursive`). The same letter varies by command — `-d` is `--description`/`--dir`/`--project-dir`; `-p` is `--password`/`--parents`/`--prefix`. **Per-command `--help` is the source of truth.** Soft convention: where a command takes credentials, `-u`/`-p` = user/password.
 
-## snapshot revert lifecycle (ADR-0002)
+## Command surface — docker/git flavor (ADR-0006)
 
-`snapshot revert` is a lifecycle macro, not a bare vmcli call: vmcli `Snapshot Revert` **errors while the VM is online** (running/paused) but tolerates off/suspended. The snapshot name is **resolved/validated first**, so a typo never powers off the VM.
+The CLI is being re-laid-out so **VM lifecycle reads like docker** and
+**snapshots read like git**. Structure is **hybrid**: lifecycle + exec/copy
+verbs flatten to the top level, everything else stays grouped.
 
-`SnapshotModule.revert(name)` restores prior power state:
+- **Top level (docker):** `ps` (lists *running* VMs; `-a` = all), `start`,
+  `stop` (graceful), `kill` (hard power-off), `restart`, `pause`/`unpause`,
+  `suspend`, `inspect` (absorbs old `power state` + `parse-vmx`), `clone`,
+  `exec` (was `guest run`; **headless by default** — `-t/--tty` wraps through the
+  guest shell (`cmd.exe /c start ""` / `sh -c '… &'`) for PATH/builtins/multi-arg
+  and detaches so the shell exits at launch; `-i/--interactive` runs on the
+  interactive desktop fire-and-forget for GUI apps (absolute path); `-it` = both
+  (GUI sweet spot, no absolute path); short flags combine like `docker run -it`;
+  no stdout capture since vmcli `Guest run` can't return guest output), `cp`
+  (merges `copy-to`/`copy-from`, docker `vm:path` syntax — direction from the
+  `vm:` side, leading `:` auto-selects, a one-alpha prefix + `:\`/`:/` is a host
+  drive not a VM).
+- **`snapshot` (git):** `log`, `commit <name> -m <msg>` (**memory-default** when
+  running / disk-only when off; `--disk-only` forces fast no-RAM; old
+  `-m`=memory short flag gone), `reset` (was `revert`), `rm`.
+- **Kept groups** (`list`→`ls`): `network`, `peripheral`, `shares`; unchanged
+  `clipboard`, `auth`, top-level `sync`/`push`.
+- **Removed:** the `power` group (flattened), the `guest` group (`guest ps`/
+  `kill` dropped so `ps`/`kill` are free for docker meaning), and `fs`,
+  `tools`, `vars`, `mks` entirely.
 
-| Prior state | Action |
-|---|---|
-| Online (running/paused) | hard-stop → revert → start (ends running) |
-| Suspended | revert only (stays suspended) |
-| Off | revert only (stays off) |
+## snapshot reset lifecycle (ADR-0002, ADR-0006)
+
+> Renamed `snapshot revert` → `snapshot reset` (ADR-0006): reverting discards
+> current state and jumps to the saved point = `git reset --hard`. Behavior unchanged.
+
+`snapshot reset` is a lifecycle macro, not a bare vmcli call: vmcli `Snapshot Revert` **errors while the VM is online** (running/paused) but tolerates off/suspended. The snapshot name is **resolved/validated first**, so a typo never powers off the VM.
+
+`SnapshotModule.revert(name)` restores prior power state: online → hard-stop → revert → start; suspended/off → revert only (state preserved).
 
 - **Hard stop, not soft** — revert discards running state anyway; a graceful shutdown is wasted and can hang without Tools.
 - Overturns the earlier "library stays faithful to must-be-off" rule: the library now owns the stop/revert/restore lifecycle. `revert(name, ensure_running=True)` forces a start regardless of prior state.
-- **CLI `vmctl snapshot revert` always ends running** (suspended→resume, off→cold boot) via `revert(..., ensure_running=True)`.
+- **CLI `vmctl snapshot reset` always ends running** (suspended→resume, off→cold boot) via `revert(..., ensure_running=True)`. (Library method stays `SnapshotModule.revert`; only the CLI verb is `reset` — ADR-0006.)
 
 ## vmcli vs vmrun
 

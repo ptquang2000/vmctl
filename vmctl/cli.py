@@ -4,12 +4,24 @@ import sys
 import click
 
 from . import VMCtl, VMCtlError
+from .registry import _normalize_path
 
 
 # Sentinel that replaces a leading ``--`` (the "no VM name here" marker). It
 # stands in for the omitted name positional so trailing positionals still bind
 # correctly; the resolution layer treats it the same as an absent name.
 _AUTO = "\x00__vmctl_auto__"
+
+# Top-level command/group aliases (ADR-0006). Additive ergonomics: each resolves
+# to the canonical command but never appears as the canonical name in help.
+_ALIASES = {
+    "ss": "snapshot",
+    "net": "network",
+    "dev": "peripheral",
+    "in": "inspect",
+    "re": "restart",
+    "ex": "exec",
+}
 
 
 def _out(data: dict) -> None:
@@ -43,10 +55,10 @@ class VMCommand(click.Command):
     Click natively consumes ``--`` (end-of-options) and shifts nothing, so we
     intercept the ``--`` that stands in for a dropped name and swap in the
     auto-select sentinel for the name positional. The marker may follow leading
-    options (e.g. ``guest run --interactive -- cmd.exe …``), so we accept the
-    first ``--`` that is preceded only by option tokens. A ``--`` that comes
-    after a real positional (an explicit VM name) keeps its conventional
-    end-of-options meaning.
+    options (e.g. ``exec --interactive -- cmd.exe …``), so we accept the first
+    ``--`` that is preceded only by option tokens. A ``--`` that comes after a
+    real positional (an explicit VM name) keeps its conventional end-of-options
+    meaning.
     """
 
     def parse_args(self, ctx, args):
@@ -64,36 +76,277 @@ class VMGroup(click.Group):
     command_class = VMCommand
 
 
-@click.group()
+class AliasedGroup(click.Group):
+    """Top-level group that resolves command aliases (``ss`` -> ``snapshot``).
+
+    Aliases stay out of ``list_commands`` so ``--help`` shows only canonical
+    names, and ``resolve_command`` reports the canonical name so usage/errors
+    never echo the alias the user typed."""
+
+    def get_command(self, ctx, name):
+        return super().get_command(ctx, _ALIASES.get(name, name))
+
+    def resolve_command(self, ctx, args):
+        _, cmd, rest = super().resolve_command(ctx, args)
+        return (cmd.name if cmd else None), cmd, rest
+
+
+@click.group(cls=AliasedGroup)
 def cli():
     pass
 
 
 # ---------------------------------------------------------------------------
-# vm
+# ps -- list VMs (docker `ps`)
 # ---------------------------------------------------------------------------
-@cli.group(cls=VMGroup)
-def vm():
-    pass
+def _ps_rows(data: dict, show_all: bool) -> list:
+    """Reshape ``list_vms()`` output into docker-style ``ps`` rows.
+
+    Running is derived by matching each discovered .vmx against the set of paths
+    ``vmrun list`` reports (normalized for case/separators). Without ``-a`` only
+    running VMs are listed; with it every discovered VM appears with its status.
+    """
+    running = {_normalize_path(p) for p in data.get("running", [])}
+    rows = []
+    for name, path in sorted(data.get("discovered", {}).items()):
+        is_running = _normalize_path(path) in running
+        if not show_all and not is_running:
+            continue
+        rows.append({"name": name, "status": "running" if is_running else "stopped"})
+    return rows
 
 
-@vm.command("list")
-def vm_list():
+@cli.command("ps")
+@click.option("-a", "--all", "show_all", is_flag=True,
+              help="Include stopped/suspended VMs (default: running only).")
+def cmd_ps(show_all):
+    """List running VMs (docker `ps`); `-a` includes stopped ones."""
     try:
-        _out(_vmctl().list_vms())
-    except VMCtlError as e:
+        _out({"vms": _ps_rows(_vmctl().list_vms(), show_all)})
+    except (VMCtlError, ValueError) as e:
         _err(str(e))
 
 
-@vm.command("clone")
+# ---------------------------------------------------------------------------
+# lifecycle (docker: start/stop/kill/restart/pause/unpause/suspend)
+# ---------------------------------------------------------------------------
+@cli.command("start", cls=VMCommand)
+@click.argument("name", required=False)
+@click.option("-P", "--paused", is_flag=True)
+def cmd_start(name, paused):
+    try:
+        vm = _resolve(name)
+        _out_vm(vm, vm.power.start(paused=paused))
+    except (VMCtlError, ValueError) as e:
+        _err(str(e))
+
+
+@cli.command("stop", cls=VMCommand)
+@click.argument("name", required=False)
+def cmd_stop(name):
+    """Gracefully shut down the guest. Use `kill` for a hard power-off."""
+    try:
+        vm = _resolve(name)
+        _out_vm(vm, vm.power.stop(hard=False))
+    except (VMCtlError, ValueError) as e:
+        _err(str(e))
+
+
+@cli.command("kill", cls=VMCommand)
+@click.argument("name", required=False)
+def cmd_kill(name):
+    """Hard power-off the VM (docker `kill`); pulls the virtual plug."""
+    try:
+        vm = _resolve(name)
+        _out_vm(vm, vm.power.stop(hard=True))
+    except (VMCtlError, ValueError) as e:
+        _err(str(e))
+
+
+@cli.command("restart", cls=VMCommand)
+@click.argument("name", required=False)
+@click.option("-H", "--hard", is_flag=True)
+def cmd_restart(name, hard):
+    try:
+        vm = _resolve(name)
+        _out_vm(vm, vm.power.reset(hard=hard))
+    except (VMCtlError, ValueError) as e:
+        _err(str(e))
+
+
+@cli.command("pause", cls=VMCommand)
+@click.argument("name", required=False)
+def cmd_pause(name):
+    try:
+        vm = _resolve(name)
+        _out_vm(vm, vm.power.pause())
+    except (VMCtlError, ValueError) as e:
+        _err(str(e))
+
+
+@cli.command("unpause", cls=VMCommand)
+@click.argument("name", required=False)
+def cmd_unpause(name):
+    try:
+        vm = _resolve(name)
+        _out_vm(vm, vm.power.unpause())
+    except (VMCtlError, ValueError) as e:
+        _err(str(e))
+
+
+@cli.command("suspend", cls=VMCommand)
+@click.argument("name", required=False)
+def cmd_suspend(name):
+    try:
+        vm = _resolve(name)
+        _out_vm(vm, vm.power.suspend())
+    except (VMCtlError, ValueError) as e:
+        _err(str(e))
+
+
+# ---------------------------------------------------------------------------
+# clone (VMware term; no docker analog)
+# ---------------------------------------------------------------------------
+@cli.command("clone", cls=VMCommand)
 @click.argument("name", required=False)
 @click.argument("dest")
 @click.option("-l", "--linked", is_flag=True)
-def vm_clone(name, dest, linked):
+def cmd_clone(name, dest, linked):
     try:
         ctl = _vmctl()
         vm = ctl.resolve(None if (name is None or name == _AUTO) else name)
         _out_vm(vm, ctl.clone(vm.name, dest, linked))
+    except (VMCtlError, ValueError) as e:
+        _err(str(e))
+
+
+# ---------------------------------------------------------------------------
+# exec (docker `exec`) -- headless by default; -t shell wrap, -i desktop
+# ---------------------------------------------------------------------------
+_CMD_EXE = r"C:\Windows\System32\cmd.exe"
+
+
+def _build_exec(program_args, guest_os: str, tty: bool):
+    """Translate `exec` tokens + the ``-t`` flag into (program, prog_args).
+
+    With ``-t`` the whole command line is wrapped in the guest shell as a single
+    detaching token -- ``cmd.exe /c start "" <cmd>`` on Windows, ``/bin/sh -c
+    '<cmd> &'`` elsewhere -- so PATH, builtins, pipes, and multiple arguments all
+    work and the launcher exits as soon as the program detaches. Without ``-t``
+    the program runs directly via vmcli, which accepts the program plus at most
+    one argument token; more than one raises (pointing at ``-t``).
+    """
+    if tty:
+        cmd = " ".join(program_args)
+        if "windows" in (guest_os or "").lower():
+            return _CMD_EXE, [f'/c start "" {cmd}']
+        return "/bin/sh", ["-c", f"{cmd} &"]
+    if len(program_args) > 2:
+        raise VMCtlError(
+            "multiple arguments need a shell; use: "
+            f"vmctl exec -t <vm> {' '.join(program_args)}"
+        )
+    program, *args = program_args
+    return program, args
+
+
+@cli.command("exec", cls=VMCommand,
+             context_settings=dict(ignore_unknown_options=True))
+@click.argument("name", required=False)
+@click.option("-i", "--interactive", is_flag=True,
+              help="Run on the guest's interactive desktop (GUI window appears); "
+                   "fire-and-forget. Alone it does not search the guest PATH, so "
+                   "the program must be an absolute path -- combine with -t to "
+                   "PATH-resolve via the shell.")
+@click.option("-t", "--tty", is_flag=True,
+              help="Run the command line through the guest shell (cmd.exe / sh) "
+                   "so PATH, builtins, pipes, and multiple arguments work; the "
+                   "program detaches so the call returns at launch.")
+@click.argument("program_args", nargs=-1)
+def cmd_exec(name, interactive, tty, program_args):
+    """Run a command in the guest (docker `exec`); headless by default.
+
+    vmcli `Guest run` only launches -- it never returns the guest program's
+    stdout -- so `exec` captures no output. `-t` wraps through the guest shell,
+    `-i` launches on the interactive desktop, `-it` combines both (the GUI sweet
+    spot: `vmctl exec -it notepad`)."""
+    if not program_args:
+        _err("program is required")
+    try:
+        vm = _resolve(name)
+        guest_os = vm._guest_os if tty else ""
+        program, args = _build_exec(program_args, guest_os, tty)
+        # -i launches fire-and-forget (--noWait); headless modes wait on the
+        # launch (which is immediate for -t, since the program detaches).
+        _out_vm(vm, vm.guest.run(
+            program, *args, no_wait=interactive, interactive=interactive))
+    except (VMCtlError, ValueError) as e:
+        _err(str(e))
+
+
+# ---------------------------------------------------------------------------
+# cp (docker `vm:path`) -- merges the old copy-to/copy-from
+# ---------------------------------------------------------------------------
+def _split_vm_path(token: str):
+    """Split a ``cp`` token into ``(vm, path)`` or ``(None, host_path)``.
+
+    A token shaped ``vm:path`` carries the VM name before the first colon; a
+    leading colon (``:path``) yields an empty VM name (auto-select). A Windows
+    drive path -- exactly one alpha char before the colon and a ``\\``/``/``
+    right after (``C:\\dir``) -- is a host path, not ``vm:path``."""
+    idx = token.find(":")
+    if idx == -1:
+        return None, token
+    if (idx == 1 and token[0].isalpha()
+            and idx + 1 < len(token) and token[idx + 1] in "\\/"):
+        return None, token
+    return token[:idx], token[idx + 1:]
+
+
+@cli.command("cp")
+@click.argument("src")
+@click.argument("dst")
+@click.option("-o", "--overwrite", is_flag=True)
+def cmd_cp(src, dst, overwrite):
+    """Copy a file between host and guest using docker `vm:path` syntax.
+
+    Direction is inferred from which side carries the `vm:` prefix:
+    `vmctl cp ./f myvm:C:\\dir` (host->guest), `vmctl cp myvm:C:\\f ./` (guest->
+    host). A leading `:` auto-selects the running VM (`vmctl cp ./f :C:\\dir`).
+    Subject to `guest copy-to`'s limits (<=60 KB, file dest); for large files use
+    `vmctl push`."""
+    try:
+        src_vm, src_path = _split_vm_path(src)
+        dst_vm, dst_path = _split_vm_path(dst)
+        if (src_vm is None) == (dst_vm is None):
+            raise VMCtlError(
+                "exactly one of SRC and DST must be a guest path written as "
+                "'vm:path' (use ':path' to auto-select the running VM); the "
+                "other is a host path"
+            )
+        if dst_vm is not None:
+            vm = _resolve(None if dst_vm == "" else dst_vm)
+            _out_vm(vm, vm.guest.copy_to(src_path, dst_path, overwrite=overwrite))
+        else:
+            vm = _resolve(None if src_vm == "" else src_vm)
+            _out_vm(vm, vm.guest.copy_from(src_path, dst_path, overwrite=overwrite))
+    except (VMCtlError, ValueError) as e:
+        _err(str(e))
+
+
+# ---------------------------------------------------------------------------
+# inspect (absorbs the old `power state` + `parse-vmx`)
+# ---------------------------------------------------------------------------
+@cli.command("inspect", cls=VMCommand)
+@click.argument("name", required=False)
+def cmd_inspect(name):
+    """Show full VM state: live queries (power, disks, network, …) plus the
+    parsed .vmx/.vmsd dump."""
+    try:
+        vm = _resolve(name)
+        data = vm.inspect.inspect()
+        data.update(vm.inspect.parse_vmx())
+        _out_vm(vm, data)
     except (VMCtlError, ValueError) as e:
         _err(str(e))
 
@@ -119,97 +372,17 @@ def auth_set(name, user, password):
 
 
 # ---------------------------------------------------------------------------
-# power
-# ---------------------------------------------------------------------------
-@cli.group(cls=VMGroup)
-def power():
-    pass
-
-
-@power.command("start")
-@click.argument("name", required=False)
-@click.option("-P", "--paused", is_flag=True)
-def power_start(name, paused):
-    try:
-        vm = _resolve(name)
-        _out_vm(vm, vm.power.start(paused=paused))
-    except (VMCtlError, ValueError) as e:
-        _err(str(e))
-
-
-@power.command("stop")
-@click.argument("name", required=False)
-@click.option("-H", "--hard", is_flag=True)
-def power_stop(name, hard):
-    try:
-        vm = _resolve(name)
-        _out_vm(vm, vm.power.stop(hard=hard))
-    except (VMCtlError, ValueError) as e:
-        _err(str(e))
-
-
-@power.command("reset")
-@click.argument("name", required=False)
-@click.option("-H", "--hard", is_flag=True)
-def power_reset(name, hard):
-    try:
-        vm = _resolve(name)
-        _out_vm(vm, vm.power.reset(hard=hard))
-    except (VMCtlError, ValueError) as e:
-        _err(str(e))
-
-
-@power.command("suspend")
-@click.argument("name", required=False)
-def power_suspend(name):
-    try:
-        vm = _resolve(name)
-        _out_vm(vm, vm.power.suspend())
-    except (VMCtlError, ValueError) as e:
-        _err(str(e))
-
-
-@power.command("pause")
-@click.argument("name", required=False)
-def power_pause(name):
-    try:
-        vm = _resolve(name)
-        _out_vm(vm, vm.power.pause())
-    except (VMCtlError, ValueError) as e:
-        _err(str(e))
-
-
-@power.command("unpause")
-@click.argument("name", required=False)
-def power_unpause(name):
-    try:
-        vm = _resolve(name)
-        _out_vm(vm, vm.power.unpause())
-    except (VMCtlError, ValueError) as e:
-        _err(str(e))
-
-
-@power.command("state")
-@click.argument("name", required=False)
-def power_state(name):
-    try:
-        vm = _resolve(name)
-        _out_vm(vm, vm.power.state())
-    except (VMCtlError, ValueError) as e:
-        _err(str(e))
-
-
-# ---------------------------------------------------------------------------
-# snapshot
+# snapshot (git: log/commit/reset/rm)
 # ---------------------------------------------------------------------------
 @cli.group(cls=VMGroup)
 def snapshot():
     pass
 
 
-@snapshot.command("list")
+@snapshot.command("log")
 @click.argument("name", required=False)
-def snapshot_list(name):
+def snapshot_log(name):
+    """List snapshots (git `log`)."""
     try:
         vm = _resolve(name)
         _out_vm(vm, vm.snapshot.list())
@@ -217,23 +390,31 @@ def snapshot_list(name):
         _err(str(e))
 
 
-@snapshot.command("take")
+@snapshot.command("commit")
 @click.argument("name", required=False)
 @click.argument("snap_name")
-@click.option("-m", "--memory", is_flag=True)
-@click.option("-d", "--description", default=None)
-def snapshot_take(name, snap_name, memory, description):
+@click.option("-m", "--message", default=None, help="Snapshot description.")
+@click.option("--disk-only", is_flag=True,
+              help="Force a fast no-RAM snapshot on a running VM.")
+def snapshot_commit(name, snap_name, message, disk_only):
+    """Create a snapshot (git `commit`). Captures memory when the VM is running
+    (disk-only when off, matching the GUI); `--disk-only` forces no-RAM."""
     try:
         vm = _resolve(name)
-        _out_vm(vm, vm.snapshot.take(snap_name, memory=memory, description=description))
+        if disk_only:
+            memory = False
+        else:
+            memory = vm.power.state().get("PowerState") == "on"
+        _out_vm(vm, vm.snapshot.take(snap_name, memory=memory, description=message))
     except (VMCtlError, ValueError) as e:
         _err(str(e))
 
 
-@snapshot.command("revert")
+@snapshot.command("reset")
 @click.argument("name", required=False)
 @click.argument("snap_name")
-def snapshot_revert(name, snap_name):
+def snapshot_reset(name, snap_name):
+    """Discard current state and jump back to a snapshot (git `reset --hard`)."""
     try:
         vm = _resolve(name)
         _out_vm(vm, vm.snapshot.revert(snap_name, ensure_running=True))
@@ -241,11 +422,12 @@ def snapshot_revert(name, snap_name):
         _err(str(e))
 
 
-@snapshot.command("delete")
+@snapshot.command("rm")
 @click.argument("name", required=False)
 @click.argument("snap_name")
 @click.option("-c", "--delete-children", is_flag=True)
-def snapshot_delete(name, snap_name, delete_children):
+def snapshot_rm(name, snap_name, delete_children):
+    """Delete a snapshot (docker `rm`)."""
     try:
         vm = _resolve(name)
         _out_vm(vm, vm.snapshot.delete(snap_name, delete_children=delete_children))
@@ -261,9 +443,9 @@ def network():
     pass
 
 
-@network.command("list")
+@network.command("ls")
 @click.argument("name", required=False)
-def network_list(name):
+def network_ls(name):
     try:
         vm = _resolve(name)
         _out_vm(vm, vm.network.list())
@@ -335,9 +517,9 @@ def peripheral():
     pass
 
 
-@peripheral.command("list")
+@peripheral.command("ls")
 @click.argument("name", required=False)
-def peripheral_list(name):
+def peripheral_ls(name):
     try:
         vm = _resolve(name)
         _out_vm(vm, vm.peripheral.list())
@@ -361,7 +543,7 @@ def peripheral_mount_iso(name, label, iso_path):
 @click.argument("name", required=False)
 @click.argument("device_id")
 def peripheral_connect(name, device_id):
-    """Connect the device with id DEVICE_ID (copy it from `peripheral list`).
+    """Connect the device with id DEVICE_ID (copy it from `peripheral ls`).
     The device type is resolved from the id; no type needs to be supplied."""
     try:
         vm = _resolve(name)
@@ -374,239 +556,11 @@ def peripheral_connect(name, device_id):
 @click.argument("name", required=False)
 @click.argument("device_id")
 def peripheral_disconnect(name, device_id):
-    """Disconnect the device with id DEVICE_ID (copy it from `peripheral list`).
+    """Disconnect the device with id DEVICE_ID (copy it from `peripheral ls`).
     The device type is resolved from the id; no type needs to be supplied."""
     try:
         vm = _resolve(name)
         _out_vm(vm, vm.peripheral.disconnect(device_id))
-    except (VMCtlError, ValueError) as e:
-        _err(str(e))
-
-
-# ---------------------------------------------------------------------------
-# guest
-# ---------------------------------------------------------------------------
-@cli.group(cls=VMGroup)
-def guest():
-    pass
-
-
-@guest.command("run")
-@click.argument("name", required=False)
-@click.option(
-    "--interactive/--no-interactive",
-    default=False,
-    help="Run on the guest's interactive desktop. Required for GUI apps to "
-    "appear; without it the program runs in the non-interactive Session 0 and "
-    "any window it opens is invisible.",
-)
-@click.argument("program_args", nargs=-1)
-def guest_run(name, interactive, program_args):
-    if not program_args:
-        _err("program is required")
-    try:
-        program, *args = program_args
-        vm = _resolve(name)
-        _out_vm(vm, vm.guest.run(program, *args, interactive=interactive))
-    except (VMCtlError, ValueError) as e:
-        _err(str(e))
-
-
-@guest.command("ps")
-@click.argument("name", required=False)
-def guest_ps(name):
-    try:
-        vm = _resolve(name)
-        _out_vm(vm, vm.guest.ps())
-    except (VMCtlError, ValueError) as e:
-        _err(str(e))
-
-
-@guest.command("kill")
-@click.argument("name", required=False)
-@click.argument("pid", type=int)
-def guest_kill(name, pid):
-    try:
-        vm = _resolve(name)
-        _out_vm(vm, vm.guest.kill(pid))
-    except (VMCtlError, ValueError) as e:
-        _err(str(e))
-
-
-@guest.command("copy-to")
-@click.argument("name", required=False)
-@click.argument("host_path")
-@click.argument("guest_path")
-@click.option("-o", "--overwrite", is_flag=True)
-def guest_copy_to(name, host_path, guest_path, overwrite):
-    try:
-        vm = _resolve(name)
-        _out_vm(vm, vm.guest.copy_to(host_path, guest_path, overwrite=overwrite))
-    except (VMCtlError, ValueError) as e:
-        _err(str(e))
-
-
-@guest.command("copy-from")
-@click.argument("name", required=False)
-@click.argument("guest_path")
-@click.argument("host_path")
-@click.option("-o", "--overwrite", is_flag=True)
-def guest_copy_from(name, guest_path, host_path, overwrite):
-    try:
-        vm = _resolve(name)
-        _out_vm(vm, vm.guest.copy_from(guest_path, host_path, overwrite=overwrite))
-    except (VMCtlError, ValueError) as e:
-        _err(str(e))
-
-
-# ---------------------------------------------------------------------------
-# fs
-# ---------------------------------------------------------------------------
-@cli.group(cls=VMGroup)
-def fs():
-    pass
-
-
-@fs.command("ls")
-@click.argument("name", required=False)
-@click.argument("path")
-@click.option("-r", "--regexp", default=None)
-@click.option("-n", "--max", "max_results", type=int, default=None)
-@click.option("-i", "--index", type=int, default=None)
-def fs_ls(name, path, regexp, max_results, index):
-    try:
-        vm = _resolve(name)
-        _out_vm(vm, vm.fs.ls(path, regexp=regexp, index=index, max=max_results))
-    except (VMCtlError, ValueError) as e:
-        _err(str(e))
-
-
-@fs.command("env")
-@click.argument("name", required=False)
-def fs_env(name):
-    try:
-        vm = _resolve(name)
-        _out_vm(vm, vm.fs.env())
-    except (VMCtlError, ValueError) as e:
-        _err(str(e))
-
-
-@fs.command("mkdir")
-@click.argument("name", required=False)
-@click.argument("path")
-@click.option("-p", "--parents", is_flag=True)
-def fs_mkdir(name, path, parents):
-    try:
-        vm = _resolve(name)
-        _out_vm(vm, vm.fs.mkdir(path, parents=parents))
-    except (VMCtlError, ValueError) as e:
-        _err(str(e))
-
-
-@fs.command("rm")
-@click.argument("name", required=False)
-@click.argument("path")
-def fs_rm(name, path):
-    try:
-        vm = _resolve(name)
-        _out_vm(vm, vm.fs.rm(path))
-    except (VMCtlError, ValueError) as e:
-        _err(str(e))
-
-
-@fs.command("rmdir")
-@click.argument("name", required=False)
-@click.argument("path")
-@click.option("-r", "--recursive", is_flag=True)
-def fs_rmdir(name, path, recursive):
-    try:
-        vm = _resolve(name)
-        _out_vm(vm, vm.fs.rmdir(path, recursive=recursive))
-    except (VMCtlError, ValueError) as e:
-        _err(str(e))
-
-
-@fs.command("mv")
-@click.argument("name", required=False)
-@click.argument("src")
-@click.argument("dst")
-@click.option("-o", "--overwrite", is_flag=True)
-def fs_mv(name, src, dst, overwrite):
-    try:
-        vm = _resolve(name)
-        _out_vm(vm, vm.fs.mv(src, dst, overwrite=overwrite))
-    except (VMCtlError, ValueError) as e:
-        _err(str(e))
-
-
-@fs.command("mvdir")
-@click.argument("name", required=False)
-@click.argument("src")
-@click.argument("dst")
-@click.option("-o", "--overwrite", is_flag=True)
-def fs_mvdir(name, src, dst, overwrite):
-    try:
-        vm = _resolve(name)
-        _out_vm(vm, vm.fs.mvdir(src, dst, overwrite=overwrite))
-    except (VMCtlError, ValueError) as e:
-        _err(str(e))
-
-
-@fs.command("mktemp")
-@click.argument("name", required=False)
-@click.option("-d", "--dir", "as_dir", is_flag=True)
-@click.option("-p", "--prefix", default="vmctl_", show_default=True)
-@click.option("-s", "--suffix", default="")
-@click.option("-D", "--directory", default=None)
-def fs_mktemp(name, as_dir, prefix, suffix, directory):
-    try:
-        vm = _resolve(name)
-        if as_dir:
-            _out_vm(vm, vm.fs.create_temp_dir(prefix=prefix, suffix=suffix, directory=directory))
-        else:
-            _out_vm(vm, vm.fs.create_temp_file(prefix=prefix, suffix=suffix, directory=directory))
-    except (VMCtlError, ValueError) as e:
-        _err(str(e))
-
-
-# ---------------------------------------------------------------------------
-# tools
-# ---------------------------------------------------------------------------
-@cli.group(cls=VMGroup)
-def tools():
-    pass
-
-
-@tools.command("query")
-@click.argument("name", required=False)
-def tools_query(name):
-    try:
-        vm = _resolve(name)
-        _out_vm(vm, vm.tools.query())
-    except (VMCtlError, ValueError) as e:
-        _err(str(e))
-
-
-@tools.command("install")
-@click.argument("name", required=False)
-@click.option("-i", "--iso-path", default=None)
-@click.option("-c", "--cmdline", default=None)
-def tools_install(name, iso_path, cmdline):
-    try:
-        vm = _resolve(name)
-        _out_vm(vm, vm.tools.install(iso_path=iso_path, cmdline=cmdline))
-    except (VMCtlError, ValueError) as e:
-        _err(str(e))
-
-
-@tools.command("upgrade")
-@click.argument("name", required=False)
-@click.option("-i", "--iso-path", default=None)
-@click.option("-c", "--cmdline", default=None)
-def tools_upgrade(name, iso_path, cmdline):
-    try:
-        vm = _resolve(name)
-        _out_vm(vm, vm.tools.upgrade(iso_path=iso_path, cmdline=cmdline))
     except (VMCtlError, ValueError) as e:
         _err(str(e))
 
@@ -619,9 +573,9 @@ def shares():
     pass
 
 
-@shares.command("list")
+@shares.command("ls")
 @click.argument("name", required=False)
-def shares_list(name):
+def shares_ls(name):
     try:
         vm = _resolve(name)
         _out_vm(vm, vm.shares.list())
@@ -704,107 +658,6 @@ def shares_set_guest_name(name, label, guest_name):
 
 
 # ---------------------------------------------------------------------------
-# mks
-# ---------------------------------------------------------------------------
-@cli.group(cls=VMGroup)
-def mks():
-    pass
-
-
-@mks.command("screenshot")
-@click.argument("name", required=False)
-@click.argument("output_path")
-def mks_screenshot(name, output_path):
-    try:
-        vm = _resolve(name)
-        _out_vm(vm, vm.mks.screenshot(output_path))
-    except (VMCtlError, ValueError) as e:
-        _err(str(e))
-
-
-@mks.command("send-key")
-@click.argument("name", required=False)
-@click.argument("hidcode", type=int)
-@click.argument("modifier", type=int)
-def mks_send_key(name, hidcode, modifier):
-    try:
-        vm = _resolve(name)
-        _out_vm(vm, vm.mks.send_key(hidcode, modifier))
-    except (VMCtlError, ValueError) as e:
-        _err(str(e))
-
-
-@mks.command("send-keys")
-@click.argument("name", required=False)
-@click.argument("sequence")
-def mks_send_keys(name, sequence):
-    try:
-        vm = _resolve(name)
-        _out_vm(vm, vm.mks.send_key_sequence(sequence))
-    except (VMCtlError, ValueError) as e:
-        _err(str(e))
-
-
-@mks.command("set-resolution")
-@click.argument("name", required=False)
-@click.argument("width", type=int)
-@click.argument("height", type=int)
-def mks_set_resolution(name, width, height):
-    try:
-        vm = _resolve(name)
-        _out_vm(vm, vm.mks.set_resolution(width, height))
-    except (VMCtlError, ValueError) as e:
-        _err(str(e))
-
-
-@mks.command("set-displays")
-@click.argument("name", required=False)
-@click.argument("count", type=int)
-def mks_set_displays(name, count):
-    try:
-        vm = _resolve(name)
-        _out_vm(vm, vm.mks.set_num_displays(count))
-    except (VMCtlError, ValueError) as e:
-        _err(str(e))
-
-
-# ---------------------------------------------------------------------------
-# vars
-# ---------------------------------------------------------------------------
-@cli.group(cls=VMGroup)
-def vars_cmd():
-    pass
-
-
-cli.add_command(vars_cmd, name="vars")
-
-
-@vars_cmd.command("read")
-@click.argument("name", required=False)
-@click.argument("namespace")
-@click.argument("key")
-def vars_read(name, namespace, key):
-    try:
-        vm = _resolve(name)
-        _out_vm(vm, vm.vars.read(namespace, key))
-    except (VMCtlError, ValueError) as e:
-        _err(str(e))
-
-
-@vars_cmd.command("write")
-@click.argument("name", required=False)
-@click.argument("namespace")
-@click.argument("key")
-@click.argument("value")
-def vars_write(name, namespace, key, value):
-    try:
-        vm = _resolve(name)
-        _out_vm(vm, vm.vars.write(namespace, key, value))
-    except (VMCtlError, ValueError) as e:
-        _err(str(e))
-
-
-# ---------------------------------------------------------------------------
 # clipboard
 # ---------------------------------------------------------------------------
 @cli.group(cls=VMGroup)
@@ -851,29 +704,6 @@ def clipboard_pull(name):
 
 
 # ---------------------------------------------------------------------------
-# inspect / parse-vmx
-# ---------------------------------------------------------------------------
-@cli.command("inspect", cls=VMCommand)
-@click.argument("name", required=False)
-def cmd_inspect(name):
-    try:
-        vm = _resolve(name)
-        _out_vm(vm, vm.inspect.inspect())
-    except (VMCtlError, ValueError) as e:
-        _err(str(e))
-
-
-@cli.command("parse-vmx", cls=VMCommand)
-@click.argument("name", required=False)
-def cmd_parse_vmx(name):
-    try:
-        vm = _resolve(name)
-        _out_vm(vm, vm.inspect.parse_vmx())
-    except (VMCtlError, ValueError) as e:
-        _err(str(e))
-
-
-# ---------------------------------------------------------------------------
 # sync / push (file-sync into the running guest, via sss)
 # ---------------------------------------------------------------------------
 def _log_stderr(msg: str) -> None:
@@ -899,7 +729,7 @@ def cmd_sync(name, optional, project_dir, user, password):
     lifecycle). The VM must be running with a guest IP; sync never boots it.
     Build-config/arch come from the sss profile's variables, not flags. For an
     ad-hoc one-off transfer use `vmctl push`; for tiny files over VMware Tools
-    use `vmctl guest copy-to`."""
+    use `vmctl cp`."""
     try:
         vm = _resolve(name)
         _out_vm(vm, vm.sync.run(
@@ -922,10 +752,9 @@ def cmd_sync(name, optional, project_dir, user, password):
                    "--user, or neither; never persisted).")
 def cmd_push(name, source, dest, user, password):
     """Copy SOURCE (file or directory, any size) into the running guest's remote
-    directory DEST over SSH/SFTP. Unlike `guest copy-to` (VMware Tools, file
-    dest, <=60 KB), `push` needs an SSH server in the guest, takes a directory
-    dest, and has no size limit. Auto-select with a leading `--`:
-    `vmctl push -- ./build C:\\app`."""
+    directory DEST over SSH/SFTP. Unlike `cp` (VMware Tools, file dest, <=60 KB),
+    `push` needs an SSH server in the guest, takes a directory dest, and has no
+    size limit. Auto-select with a leading `--`: `vmctl push -- ./build C:\\app`."""
     try:
         vm = _resolve(name)
         _out_vm(vm, vm.sync.push(source, dest, log=_log_stderr,
