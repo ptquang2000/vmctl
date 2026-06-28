@@ -93,6 +93,18 @@ class AliasedGroup(click.Group):
 
 @click.group(cls=AliasedGroup)
 def cli():
+    """Control VMware Workstation VMs from the terminal.
+
+    The command surface mirrors docker/git: `ps`, `start`, `stop`, `kill`,
+    `restart`, `exec`, `cp`, `inspect`, plus `snapshot` (git-style log/commit/
+    reset/rm) and grouped `network`/`peripheral`/`shares`/`clipboard` commands.
+    Every result is JSON on stdout.
+
+    The leading VM name is optional on VM commands: omit it to auto-select the
+    single running in-scope VM. When other positionals follow, mark the omitted
+    name with a leading `--` (e.g. `snapshot commit -- nightly`). Short aliases:
+    ss=snapshot, net=network, dev=peripheral, in=inspect, re=restart, ex=exec.
+    """
     pass
 
 
@@ -132,8 +144,12 @@ def cmd_ps(show_all):
 # ---------------------------------------------------------------------------
 @cli.command("start", cls=VMCommand)
 @click.argument("name", required=False)
-@click.option("-P", "--paused", is_flag=True)
+@click.option("-P", "--paused", is_flag=True,
+              help="Boot headless (no Workstation console window). A memory "
+                   "snapshot's interactive session is still restored.")
 def cmd_start(name, paused):
+    """Power on the VM (docker `start`); opens the Workstation console by
+    default. Use `-P` to boot headless."""
     try:
         vm = _resolve(name)
         _out_vm(vm, vm.power.start(paused=paused))
@@ -165,8 +181,12 @@ def cmd_kill(name):
 
 @cli.command("restart", cls=VMCommand)
 @click.argument("name", required=False)
-@click.option("-H", "--hard", is_flag=True)
+@click.option("-H", "--hard", is_flag=True,
+              help="Reset the virtual power button instead of asking the guest "
+                   "to reboot gracefully.")
 def cmd_restart(name, hard):
+    """Reboot the VM (docker `restart`); graceful by default, `-H` forces a hard
+    reset."""
     try:
         vm = _resolve(name)
         _out_vm(vm, vm.power.reset(hard=hard))
@@ -177,6 +197,8 @@ def cmd_restart(name, hard):
 @cli.command("pause", cls=VMCommand)
 @click.argument("name", required=False)
 def cmd_pause(name):
+    """Freeze the running VM's CPU (docker `pause`); resume with `unpause`. State
+    stays in RAM and the VM keeps reporting as on."""
     try:
         vm = _resolve(name)
         _out_vm(vm, vm.power.pause())
@@ -187,6 +209,7 @@ def cmd_pause(name):
 @cli.command("unpause", cls=VMCommand)
 @click.argument("name", required=False)
 def cmd_unpause(name):
+    """Resume a VM frozen with `pause` (docker `unpause`)."""
     try:
         vm = _resolve(name)
         _out_vm(vm, vm.power.unpause())
@@ -197,6 +220,8 @@ def cmd_unpause(name):
 @cli.command("suspend", cls=VMCommand)
 @click.argument("name", required=False)
 def cmd_suspend(name):
+    """Suspend the VM to disk (save state and stop). `start` resumes from where
+    it left off; unlike `pause` the VM is no longer running."""
     try:
         vm = _resolve(name)
         _out_vm(vm, vm.power.suspend())
@@ -210,8 +235,12 @@ def cmd_suspend(name):
 @cli.command("clone", cls=VMCommand)
 @click.argument("name", required=False)
 @click.argument("dest")
-@click.option("-l", "--linked", is_flag=True)
+@click.option("-l", "--linked", is_flag=True,
+              help="Make a linked clone (fast, shares the source's disk via a "
+                   "delta) instead of a full independent copy.")
 def cmd_clone(name, dest, linked):
+    """Clone the VM to DEST (a new .vmx path). Full copy by default; `-l` for a
+    linked clone."""
     try:
         ctl = _vmctl()
         vm = ctl.resolve(None if (name is None or name == _AUTO) else name)
@@ -306,7 +335,8 @@ def _split_vm_path(token: str):
 @cli.command("cp")
 @click.argument("src")
 @click.argument("dst")
-@click.option("-o", "--overwrite", is_flag=True)
+@click.option("-o", "--overwrite", is_flag=True,
+              help="Overwrite the destination file if it already exists.")
 def cmd_cp(src, dst, overwrite):
     """Copy a file between host and guest using docker `vm:path` syntax.
 
@@ -356,14 +386,17 @@ def cmd_inspect(name):
 # ---------------------------------------------------------------------------
 @cli.group()
 def auth():
+    """Manage stored guest login credentials (saved in ~/.vmctl/config.json)."""
     pass
 
 
 @auth.command("set")
 @click.argument("name")
-@click.option("-u", "--user", required=True)
-@click.option("-p", "--password", required=True)
+@click.option("-u", "--user", required=True, help="Guest login username.")
+@click.option("-p", "--password", required=True, help="Guest login password.")
 def auth_set(name, user, password):
+    """Store the guest username/password for VM NAME. Guest operations (exec, cp,
+    sync, …) use these credentials to authenticate into the guest OS."""
     try:
         _vmctl().set_credentials(name, user, password)
         _out({"success": True})
@@ -376,6 +409,7 @@ def auth_set(name, user, password):
 # ---------------------------------------------------------------------------
 @cli.group(cls=VMGroup)
 def snapshot():
+    """Manage VM snapshots (git-style: log/commit/reset/rm)."""
     pass
 
 
@@ -425,7 +459,8 @@ def snapshot_reset(name, snap_name):
 @snapshot.command("rm")
 @click.argument("name", required=False)
 @click.argument("snap_name")
-@click.option("-c", "--delete-children", is_flag=True)
+@click.option("-c", "--delete-children", is_flag=True,
+              help="Also delete all snapshots descended from this one.")
 def snapshot_rm(name, snap_name, delete_children):
     """Delete a snapshot (docker `rm`)."""
     try:
@@ -440,12 +475,15 @@ def snapshot_rm(name, snap_name, delete_children):
 # ---------------------------------------------------------------------------
 @cli.group(cls=VMGroup)
 def network():
+    """Inspect and configure the VM's network adapters."""
     pass
 
 
 @network.command("ls")
 @click.argument("name", required=False)
 def network_ls(name):
+    """List the VM's Ethernet adapters and their static config (connection type,
+    MAC, network name)."""
     try:
         vm = _resolve(name)
         _out_vm(vm, vm.network.list())
@@ -456,6 +494,8 @@ def network_ls(name):
 @network.command("ip")
 @click.argument("name", required=False)
 def network_ip(name):
+    """Show the running guest's current IP address. Returns an empty string if
+    the guest has no IP yet; the VM must be powered on."""
     try:
         vm = _resolve(name)
         _out_vm(vm, vm.network.ip())
@@ -467,6 +507,7 @@ def network_ip(name):
 @click.argument("name", required=False)
 @click.argument("label")
 def network_connect(name, label):
+    """Connect (plug in) the network adapter LABEL."""
     try:
         vm = _resolve(name)
         _out_vm(vm, vm.network.connect(label))
@@ -478,6 +519,7 @@ def network_connect(name, label):
 @click.argument("name", required=False)
 @click.argument("label")
 def network_disconnect(name, label):
+    """Disconnect (unplug) the network adapter LABEL."""
     try:
         vm = _resolve(name)
         _out_vm(vm, vm.network.disconnect(label))
@@ -490,6 +532,7 @@ def network_disconnect(name, label):
 @click.argument("label")
 @click.argument("type_")
 def network_set_type(name, label, type_):
+    """Set adapter LABEL's connection type TYPE_ (e.g. bridged, nat, hostonly)."""
     try:
         vm = _resolve(name)
         _out_vm(vm, vm.network.set_type(label, type_))
@@ -502,6 +545,7 @@ def network_set_type(name, label, type_):
 @click.argument("label")
 @click.argument("network_name")
 def network_set_name(name, label, network_name):
+    """Set adapter LABEL's virtual network name (e.g. VMnet0)."""
     try:
         vm = _resolve(name)
         _out_vm(vm, vm.network.set_name(label, network_name))
@@ -514,12 +558,15 @@ def network_set_name(name, label, network_name):
 # ---------------------------------------------------------------------------
 @cli.group(cls=VMGroup)
 def peripheral():
+    """Manage virtual devices: disks, CD/DVD drives, serial ports, USB."""
     pass
 
 
 @peripheral.command("ls")
 @click.argument("name", required=False)
 def peripheral_ls(name):
+    """List the VM's devices as a flat table of {id, type, connected, backing}.
+    Copy an `id` to use with connect/disconnect/mount-iso."""
     try:
         vm = _resolve(name)
         _out_vm(vm, vm.peripheral.list())
@@ -532,6 +579,7 @@ def peripheral_ls(name):
 @click.argument("label")
 @click.argument("iso_path")
 def peripheral_mount_iso(name, label, iso_path):
+    """Back the CD/DVD drive LABEL with the ISO at ISO_PATH (host-side path)."""
     try:
         vm = _resolve(name)
         _out_vm(vm, vm.peripheral.mount_iso(label, iso_path))
@@ -570,12 +618,15 @@ def peripheral_disconnect(name, device_id):
 # ---------------------------------------------------------------------------
 @cli.group(cls=VMGroup)
 def shares():
+    """Manage HGFS shared folders (host directories visible inside the guest)."""
     pass
 
 
 @shares.command("ls")
 @click.argument("name", required=False)
 def shares_ls(name):
+    """List the VM's HGFS shared folders with their labels, host paths, and
+    flags."""
     try:
         vm = _resolve(name)
         _out_vm(vm, vm.shares.list())
@@ -586,8 +637,11 @@ def shares_ls(name):
 @shares.command("add")
 @click.argument("name", required=False)
 @click.argument("host_path")
-@click.option("-w", "--writable", is_flag=True)
-@click.option("-g", "--guest-name", default=None)
+@click.option("-w", "--writable", is_flag=True,
+              help="Allow the guest to write to the share (default: read-only).")
+@click.option("-g", "--guest-name", default=None,
+              help="Name the share appears under in the guest (default: the "
+                   "assigned sharedFolderN label).")
 def shares_add(name, host_path, writable, guest_name):
     """Add an HGFS share. Returns the assigned label (e.g. "sharedFolder0");
     pass that label to remove/set-* commands."""
@@ -602,6 +656,7 @@ def shares_add(name, host_path, writable, guest_name):
 @click.argument("name", required=False)
 @click.argument("label")
 def shares_remove(name, label):
+    """Remove the HGFS share LABEL."""
     try:
         vm = _resolve(name)
         _out_vm(vm, vm.shares.remove(label))
@@ -614,6 +669,7 @@ def shares_remove(name, label):
 @click.argument("label")
 @click.argument("host_path")
 def shares_set_path(name, label, host_path):
+    """Repoint share LABEL at a different host directory HOST_PATH."""
     try:
         vm = _resolve(name)
         _out_vm(vm, vm.shares.set_path(label, host_path))
@@ -626,6 +682,7 @@ def shares_set_path(name, label, host_path):
 @click.argument("label")
 @click.argument("value", type=click.Choice(["true", "false"]))
 def shares_set_writable(name, label, value):
+    """Set whether the guest may write to share LABEL (VALUE: true|false)."""
     try:
         vm = _resolve(name)
         _out_vm(vm, vm.shares.set_writable(label, value == "true"))
@@ -638,6 +695,7 @@ def shares_set_writable(name, label, value):
 @click.argument("label")
 @click.argument("value", type=click.Choice(["true", "false"]))
 def shares_set_enabled(name, label, value):
+    """Enable or disable share LABEL without removing it (VALUE: true|false)."""
     try:
         vm = _resolve(name)
         _out_vm(vm, vm.shares.set_enabled(label, value == "true"))
@@ -650,6 +708,7 @@ def shares_set_enabled(name, label, value):
 @click.argument("label")
 @click.argument("guest_name")
 def shares_set_guest_name(name, label, guest_name):
+    """Rename how share LABEL appears inside the guest to GUEST_NAME."""
     try:
         vm = _resolve(name)
         _out_vm(vm, vm.shares.set_guest_name(label, guest_name))
@@ -662,6 +721,7 @@ def shares_set_guest_name(name, label, guest_name):
 # ---------------------------------------------------------------------------
 @cli.group(cls=VMGroup)
 def clipboard():
+    """Push/pull text between the host and the guest clipboard."""
     pass
 
 
@@ -669,6 +729,8 @@ def clipboard():
 @click.argument("name", required=False)
 @click.argument("text", required=False)
 def clipboard_push(name, text):
+    """Set the guest clipboard to TEXT. TEXT may be piped on stdin instead; to
+    push literal text to the auto-selected VM use `clipboard push -- TEXT`."""
     try:
         if text is None and not sys.stdin.isatty():
             text = sys.stdin.read()
@@ -696,6 +758,7 @@ def clipboard_push(name, text):
 @clipboard.command("pull")
 @click.argument("name", required=False)
 def clipboard_pull(name):
+    """Read the guest clipboard's current text and print it."""
     try:
         vm = _resolve(name)
         _out_vm(vm, vm.clipboard.pull_text())
