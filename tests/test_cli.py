@@ -1,38 +1,53 @@
-"""Unit tests for the CLI resolution layer: optional VM name, the leading-``--``
-marker, the uniform ``vm`` output key, the docker/git-flavored command surface
-(ADR-0006), and the excluded/removed commands.
+"""Unit tests for the CLI: the resolution layer (optional VM name, the
+leading-``--`` marker, auto-select), the docker/git-flavored command surface
+(ADR-0006), and the human-text output contract (ADR-0007).
+
+Output is now human-readable text, not JSON: the library is the structured
+interface. So these tests assert two things -- (1) the *resolution/binding*
+behavior, by recording how the fake modules were called, and (2) that the CLI is
+*wired to render*, by asserting the rendered confirmation line (verb + resolved
+VM name). The exhaustive table/alignment shapes are tested directly in
+``test_render.py``; here we only check the wiring.
 
 A fake VMCtl stands in for the real one. ``resolve`` mimics the auto-select
-contract (single running VM, or the zero/multiple errors); module methods echo
-their call so the injected ``vm`` key and argument binding can be asserted.
+contract (single running VM, or the zero/multiple errors); every fake module
+call is appended to the controller's ``calls`` log so argument binding and the
+resolved VM name can be asserted without parsing output.
 """
-
-import json
 
 import click
 import pytest
 from click.testing import CliRunner
 
 import vmctl.cli as cli_mod
+from vmctl import render
 from vmctl.cli import cli, _build_exec, _split_vm_path, _ps_rows
 from vmctl.exceptions import VMCtlError
 
 
 class FakeModule:
-    """Any method call returns a record of how it was invoked."""
+    """Any method call records its invocation on the shared log and echoes it."""
+
+    def __init__(self, module_name, log):
+        self._module = module_name
+        self._log = log
 
     def __getattr__(self, method):
         def _call(*args, **kwargs):
-            return {"called": method, "args": list(args), "kwargs": kwargs}
+            record = {"module": self._module, "called": method,
+                      "args": list(args), "kwargs": kwargs}
+            self._log.append(record)
+            return dict(record)
         return _call
 
 
 class FakeVM:
-    def __init__(self, name):
+    def __init__(self, name, log):
         self.name = name
+        self._log = log
 
-    def __getattr__(self, _module):
-        return FakeModule()
+    def __getattr__(self, module):
+        return FakeModule(module, self._log)
 
 
 class FakeCtl:
@@ -41,6 +56,7 @@ class FakeCtl:
         self.discovered = discovered or {}
         self.clone_calls = []
         self.cred_calls = []
+        self.calls = []  # every fake module method call, in order
 
     def resolve(self, name):
         if name is None:
@@ -49,8 +65,8 @@ class FakeCtl:
             if len(self.running) > 1:
                 cands = ", ".join(sorted(self.running))
                 raise ValueError(f"multiple running VMs ({cands}); pass a name")
-            return FakeVM(self.running[0])
-        return FakeVM(name.lower())  # canonical = lowercased
+            return FakeVM(self.running[0], self.calls)
+        return FakeVM(name.lower(), self.calls)  # canonical = lowercased
 
     def clone(self, name, dest, linked):
         self.clone_calls.append((name, dest, linked))
@@ -63,16 +79,21 @@ class FakeCtl:
         return {"running": [], "discovered": self.discovered}
 
 
+def _last(ctl, method):
+    """The most recent recorded call to ``method`` (across modules)."""
+    for record in reversed(ctl.calls):
+        if record["called"] == method:
+            return record
+    raise AssertionError(f"no call to {method!r} in {ctl.calls}")
+
+
 @pytest.fixture
 def run(monkeypatch):
     def _run(args, running=("box",)):
-        monkeypatch.setattr(cli_mod, "VMCtl", lambda: FakeCtl(running))
+        ctl = FakeCtl(running)
+        monkeypatch.setattr(cli_mod, "VMCtl", lambda: ctl)
         result = CliRunner().invoke(cli, args)
-        try:
-            payload = json.loads(result.output)
-        except (json.JSONDecodeError, ValueError):
-            payload = None
-        return result, payload
+        return result, ctl
     return _run
 
 
@@ -81,18 +102,20 @@ def run(monkeypatch):
 # --------------------------------------------------------------------------- #
 
 
-def test_explicit_name_adds_vm_key(run):
-    result, payload = run(["stop", "MyVM"])
+def test_explicit_name_renders_confirmation_with_canonical_name(run):
+    result, ctl = run(["stop", "MyVM"])
     assert result.exit_code == 0
-    assert payload["vm"] == "myvm"  # canonicalized
-    assert payload["called"] == "stop"
+    assert result.output.strip() == "stopped myvm"  # canonicalized
+    assert _last(ctl, "stop")["kwargs"] == {"hard": False}
 
 
 def test_explicit_multi_positional(run):
-    result, payload = run(["snapshot", "commit", "myvm", "s1", "-m", "msg"])
-    assert payload["vm"] == "myvm"
-    assert payload["args"] == ["s1"]
-    assert payload["kwargs"]["description"] == "msg"
+    result, ctl = run(["snapshot", "commit", "myvm", "s1", "-m", "msg"])
+    assert result.exit_code == 0
+    assert result.output.strip() == "committed s1 on myvm"
+    take = _last(ctl, "take")
+    assert take["args"] == ["s1"]
+    assert take["kwargs"]["description"] == "msg"
 
 
 # --------------------------------------------------------------------------- #
@@ -101,22 +124,23 @@ def test_explicit_multi_positional(run):
 
 
 def test_bare_name_only_command_auto_selects(run):
-    result, payload = run(["stop"], running=("box",))
+    result, ctl = run(["stop"], running=("box",))
     assert result.exit_code == 0
-    assert payload["vm"] == "box"
+    assert result.output.strip() == "stopped box"
 
 
 def test_auto_select_zero_running_errors(run):
-    result, payload = run(["stop"], running=())
+    result, ctl = run(["stop"], running=())
     assert result.exit_code == 1
-    assert "no running VM to auto-select" in payload["error"]
+    assert result.output.strip() == "error: no running VM to auto-select; pass a name"
 
 
 def test_auto_select_multiple_running_errors(run):
-    result, payload = run(["stop"], running=("a", "b"))
+    result, ctl = run(["stop"], running=("a", "b"))
     assert result.exit_code == 1
-    assert "multiple running VMs" in payload["error"]
-    assert "a, b" in payload["error"]
+    assert "error:" in result.output
+    assert "multiple running VMs" in result.output
+    assert "a, b" in result.output
 
 
 # --------------------------------------------------------------------------- #
@@ -125,48 +149,48 @@ def test_auto_select_multiple_running_errors(run):
 
 
 def test_leading_dashdash_binds_remaining_positionals(run):
-    result, payload = run(["snapshot", "commit", "--", "s1", "-m", "msg"],
-                          running=("box",))
+    result, ctl = run(["snapshot", "commit", "--", "s1", "-m", "msg"],
+                      running=("box",))
     assert result.exit_code == 0
-    assert payload["vm"] == "box"  # auto-selected
-    assert payload["args"] == ["s1"]  # snap_name still binds
-    assert payload["kwargs"]["description"] == "msg"  # trailing flag still parses
+    assert result.output.strip() == "committed s1 on box"  # auto-selected
+    take = _last(ctl, "take")
+    assert take["args"] == ["s1"]
+    assert take["kwargs"]["description"] == "msg"  # trailing flag still parses
 
 
 def test_leading_dashdash_on_exec(run):
-    result, payload = run(["exec", "--", "ipconfig"], running=("box",))
+    result, ctl = run(["exec", "--", "ipconfig"], running=("box",))
     assert result.exit_code == 0
-    assert payload["vm"] == "box"
-    assert payload["called"] == "run"
-    assert payload["args"] == ["ipconfig"]
+    assert result.output.strip() == "launched on box"
+    run_call = _last(ctl, "run")
+    assert run_call["args"] == ["ipconfig"]
 
 
 def test_dashdash_after_option_still_auto_selects(run):
     # `-i` before `--`: the marker must still drop the name and auto-select.
-    result, payload = run(
+    result, ctl = run(
         ["exec", "-i", "--", r"C:\Windows\System32\notepad.exe"],
         running=("box",),
     )
     assert result.exit_code == 0
-    assert payload["vm"] == "box"  # auto-selected
-    assert payload["kwargs"]["interactive"] is True
+    assert result.output.strip() == "launched on box"  # auto-selected
+    assert _last(ctl, "run")["kwargs"]["interactive"] is True
 
 
 def test_dashdash_after_explicit_name_is_conventional_on_exec(run):
-    result, payload = run(
-        ["exec", "myvm", "-i", "--", r"C:\x.exe"],
-    )
+    result, ctl = run(["exec", "myvm", "-i", "--", r"C:\x.exe"])
     assert result.exit_code == 0
-    assert payload["vm"] == "myvm"
-    assert payload["args"] == [r"C:\x.exe"]
-    assert payload["kwargs"]["interactive"] is True
+    assert result.output.strip() == "launched on myvm"
+    run_call = _last(ctl, "run")
+    assert run_call["args"] == [r"C:\x.exe"]
+    assert run_call["kwargs"]["interactive"] is True
 
 
 def test_non_leading_dashdash_is_conventional(run):
-    result, payload = run(["snapshot", "commit", "myvm", "--", "s1"])
+    result, ctl = run(["snapshot", "commit", "myvm", "--", "s1"])
     assert result.exit_code == 0
-    assert payload["vm"] == "myvm"
-    assert payload["args"] == ["s1"]
+    assert result.output.strip() == "committed s1 on myvm"
+    assert _last(ctl, "take")["args"] == ["s1"]
 
 
 # --------------------------------------------------------------------------- #
@@ -175,30 +199,28 @@ def test_non_leading_dashdash_is_conventional(run):
 
 
 def test_ps_lists_running_only_by_default(monkeypatch):
-    ctl = FakeCtl(running=("box",), discovered={"box": "/vms/box.vmx",
-                                                "off": "/vms/off.vmx"})
+    ctl = FakeCtl(running=("box",))
     ctl.list_vms = lambda: {"running": ["/vms/box.vmx"],
                             "discovered": {"box": "/vms/box.vmx",
                                            "off": "/vms/off.vmx"}}
     monkeypatch.setattr(cli_mod, "VMCtl", lambda: ctl)
     result = CliRunner().invoke(cli, ["ps"])
-    payload = json.loads(result.output)
     assert result.exit_code == 0
-    assert payload["vms"] == [{"name": "box", "status": "running"}]
+    assert result.output.strip() == render.ps([{"name": "box", "status": "running"}])
+    assert "off" not in result.output
 
 
 def test_ps_all_includes_stopped(monkeypatch):
-    monkeypatch.setattr(cli_mod, "VMCtl", lambda: FakeCtl(running=()))
     runner_data = {"running": ["/vms/box.vmx"],
                    "discovered": {"box": "/vms/box.vmx", "off": "/vms/off.vmx"}}
     monkeypatch.setattr(cli_mod, "VMCtl",
                         lambda: type("C", (), {"list_vms": lambda self: runner_data})())
     result = CliRunner().invoke(cli, ["ps", "-a"])
-    payload = json.loads(result.output)
-    assert payload["vms"] == [
+    assert result.exit_code == 0
+    assert result.output.strip() == render.ps([
         {"name": "box", "status": "running"},
         {"name": "off", "status": "stopped"},
-    ]
+    ])
 
 
 def test_ps_rows_pure():
@@ -212,11 +234,12 @@ def test_ps_rows_pure():
     ]
 
 
-def test_ps_has_no_vm_key(run):
-    result, payload = run(["ps"])
+def test_ps_renders_name_status_table_without_vm_prefix(run):
+    result, ctl = run(["ps"])
     assert result.exit_code == 0
-    assert "vm" not in payload
-    assert "vms" in payload
+    # A header table, not a per-VM `vm:` field (the `vm` key left CLI output).
+    assert result.output.startswith("NAME")
+    assert "vm:" not in result.output
 
 
 # --------------------------------------------------------------------------- #
@@ -225,54 +248,60 @@ def test_ps_has_no_vm_key(run):
 
 
 def test_kill_is_hard_stop(run):
-    result, payload = run(["kill", "myvm"])
-    assert payload["called"] == "stop"
-    assert payload["kwargs"]["hard"] is True
+    result, ctl = run(["kill", "myvm"])
+    assert result.output.strip() == "killed myvm"
+    assert _last(ctl, "stop")["kwargs"]["hard"] is True
 
 
 def test_stop_is_graceful(run):
-    result, payload = run(["stop", "myvm"])
-    assert payload["called"] == "stop"
-    assert payload["kwargs"]["hard"] is False
+    result, ctl = run(["stop", "myvm"])
+    assert result.output.strip() == "stopped myvm"
+    assert _last(ctl, "stop")["kwargs"]["hard"] is False
 
 
 def test_restart_maps_to_reset(run):
-    result, payload = run(["restart", "myvm", "-H"])
-    assert payload["called"] == "reset"
-    assert payload["kwargs"]["hard"] is True
+    result, ctl = run(["restart", "myvm", "-H"])
+    assert result.output.strip() == "restarted myvm"
+    assert _last(ctl, "reset")["kwargs"]["hard"] is True
 
 
 def test_snapshot_log_maps_to_list(run):
-    result, payload = run(["snapshot", "log", "myvm"])
-    assert payload["called"] == "list"
+    result, ctl = run(["snapshot", "log", "myvm"])
+    assert result.exit_code == 0
+    assert _last(ctl, "list")["module"] == "snapshot"
 
 
 def test_snapshot_reset_maps_to_revert(run):
-    result, payload = run(["snapshot", "reset", "myvm", "s1"])
-    assert payload["called"] == "revert"
-    assert payload["args"] == ["s1"]
-    assert payload["kwargs"]["ensure_running"] is True
+    result, ctl = run(["snapshot", "reset", "myvm", "s1"])
+    assert result.output.strip() == "reset myvm to s1"
+    revert = _last(ctl, "revert")
+    assert revert["args"] == ["s1"]
+    assert revert["kwargs"]["ensure_running"] is True
 
 
 def test_snapshot_rm_maps_to_delete(run):
-    result, payload = run(["snapshot", "rm", "myvm", "s1", "-c"])
-    assert payload["called"] == "delete"
-    assert payload["kwargs"]["delete_children"] is True
+    result, ctl = run(["snapshot", "rm", "myvm", "s1", "-c"])
+    assert result.output.strip() == "removed s1 from myvm"
+    delete = _last(ctl, "delete")
+    assert delete["kwargs"]["delete_children"] is True
 
 
 def test_network_ls_maps_to_list(run):
-    result, payload = run(["network", "ls", "myvm"])
-    assert payload["called"] == "list"
+    result, ctl = run(["network", "ls", "myvm"])
+    assert result.exit_code == 0
+    assert _last(ctl, "list")["module"] == "network"
 
 
 def test_peripheral_ls_maps_to_list(run):
-    result, payload = run(["peripheral", "ls", "myvm"])
-    assert payload["called"] == "list"
+    result, ctl = run(["peripheral", "ls", "myvm"])
+    assert result.exit_code == 0
+    assert _last(ctl, "list")["module"] == "peripheral"
 
 
 def test_shares_ls_maps_to_list(run):
-    result, payload = run(["shares", "ls", "myvm"])
-    assert payload["called"] == "list"
+    result, ctl = run(["shares", "ls", "myvm"])
+    assert result.exit_code == 0
+    assert _last(ctl, "list")["module"] == "shares"
 
 
 # --------------------------------------------------------------------------- #
@@ -284,7 +313,7 @@ class PowerStateVM(FakeVM):
     """FakeVM whose power.state() returns a fixed PowerState, recording take()."""
 
     def __init__(self, name, power_state):
-        super().__init__(name)
+        super().__init__(name, [])
         self._power_state = power_state
         self.take_calls = []
 
@@ -365,7 +394,7 @@ class GuestRecorder:
 
 class ExecVM(FakeVM):
     def __init__(self, name, rec, guest_os="windows9-64"):
-        super().__init__(name)
+        super().__init__(name, [])
         self._rec = rec
         self.__dict__["_guest_os"] = guest_os
 
@@ -393,6 +422,7 @@ def exec_run(monkeypatch):
 def test_exec_bare_headless_runs_program_directly(exec_run):
     result, rec = exec_run(["exec", "myvm", "ipconfig"])
     assert result.exit_code == 0
+    assert result.output.strip() == "launched on myvm"
     assert rec.calls == [{"program": "ipconfig", "args": [],
                           "no_wait": False, "interactive": False}]
 
@@ -407,8 +437,7 @@ def test_exec_bare_one_arg_ok(exec_run):
 def test_exec_bare_multi_arg_errors_and_never_calls_vmcli(exec_run):
     result, rec = exec_run(["exec", "myvm", "echo", "a", "b"])
     assert result.exit_code == 1
-    payload = json.loads(result.output)
-    assert "use: vmctl exec -t" in payload["error"]
+    assert "use: vmctl exec -t" in result.output
     assert rec.calls == []
 
 
@@ -495,7 +524,7 @@ def test_build_exec_tty_non_windows():
 
 class CpVM(FakeVM):
     def __init__(self, name, rec):
-        super().__init__(name)
+        super().__init__(name, [])
         self._rec = rec
 
     @property
@@ -528,52 +557,48 @@ def cp_run(monkeypatch):
 
         monkeypatch.setattr(cli_mod, "VMCtl", lambda: Ctl(running))
         result = CliRunner().invoke(cli, args)
-        try:
-            payload = json.loads(result.output)
-        except (json.JSONDecodeError, ValueError):
-            payload = None
-        return result, payload, rec
+        return result, rec
     return _run
 
 
 def test_cp_host_to_guest(cp_run):
-    result, payload, rec = cp_run(["cp", "./f", r"myvm:C:\dir\f.txt"])
+    result, rec = cp_run(["cp", "./f", r"myvm:C:\dir\f.txt"])
     assert result.exit_code == 0
-    assert payload["vm"] == "myvm"
+    assert result.output.strip() == r"copied ./f -> myvm:C:\dir\f.txt"
     assert rec.calls == [("copy_to", "./f", r"C:\dir\f.txt", False)]
 
 
 def test_cp_guest_to_host(cp_run):
-    result, payload, rec = cp_run(["cp", r"myvm:C:\f.txt", "./out"])
+    result, rec = cp_run(["cp", r"myvm:C:\f.txt", "./out"])
     assert result.exit_code == 0
-    assert payload["vm"] == "myvm"
+    assert result.output.strip() == r"copied myvm:C:\f.txt -> ./out"
     assert rec.calls == [("copy_from", r"C:\f.txt", "./out", False)]
 
 
 def test_cp_leading_colon_auto_selects(cp_run):
-    result, payload, rec = cp_run(["cp", "./f", r":C:\dir\f.txt"], running=("box",))
+    result, rec = cp_run(["cp", "./f", r":C:\dir\f.txt"], running=("box",))
     assert result.exit_code == 0
-    assert payload["vm"] == "box"  # auto-selected
+    assert result.output.strip() == r"copied ./f -> box:C:\dir\f.txt"  # auto-selected
     assert rec.calls == [("copy_to", "./f", r"C:\dir\f.txt", False)]
 
 
 def test_cp_overwrite_flag(cp_run):
-    result, payload, rec = cp_run(["cp", "-o", "./f", "myvm:/tmp/f"])
+    result, rec = cp_run(["cp", "-o", "./f", "myvm:/tmp/f"])
     assert rec.calls == [("copy_to", "./f", "/tmp/f", True)]
 
 
 def test_cp_drive_letter_is_host_path_not_vm(cp_run):
     # Both sides are host paths (C:\x is a drive path, ./out has no colon).
-    result, payload, rec = cp_run(["cp", r"C:\x", "./out"])
+    result, rec = cp_run(["cp", r"C:\x", "./out"])
     assert result.exit_code == 1
-    assert "exactly one" in payload["error"]
+    assert "exactly one" in result.output
     assert rec.calls == []
 
 
 def test_cp_no_guest_side_errors(cp_run):
-    result, payload, rec = cp_run(["cp", "./a", "./b"])
+    result, rec = cp_run(["cp", "./a", "./b"])
     assert result.exit_code == 1
-    assert "exactly one" in payload["error"]
+    assert "exactly one" in result.output
 
 
 # --- _split_vm_path pure unit tests ---
@@ -611,15 +636,16 @@ def test_alias_resolves_to_canonical_command(alias, canonical):
 
 
 def test_alias_ss_log_runs(run):
-    result, payload = run(["ss", "log", "myvm"])
+    result, ctl = run(["ss", "log", "myvm"])
     assert result.exit_code == 0
-    assert payload["called"] == "list"
+    assert _last(ctl, "list")["module"] == "snapshot"
 
 
 def test_alias_re_restarts(run):
-    result, payload = run(["re", "myvm"])
+    result, ctl = run(["re", "myvm"])
     assert result.exit_code == 0
-    assert payload["called"] == "reset"
+    assert result.output.strip() == "restarted myvm"
+    assert _last(ctl, "reset")["module"] == "power"
 
 
 def test_aliases_not_listed_in_help(run):
@@ -646,30 +672,29 @@ class InspectVM(FakeVM):
         return _Inspect()
 
 
-def test_inspect_merges_state_and_vmx(monkeypatch):
+def test_inspect_renders_curated_summary(monkeypatch):
     class Ctl(FakeCtl):
         def resolve(self, name):
-            return InspectVM("box")
+            return InspectVM("box", [])
 
     monkeypatch.setattr(cli_mod, "VMCtl", lambda: Ctl(("box",)))
     result = CliRunner().invoke(cli, ["inspect", "myvm"])
-    payload = json.loads(result.output)
     assert result.exit_code == 0
-    assert payload["vm"] == "box"
-    assert payload["power"] == {"PowerState": "on"}  # absorbs `power state`
-    assert payload["vmx"] == {"displayName": "box"}  # absorbs `parse-vmx`
+    # A curated summary keyed on the canonical name, not the full dump: the
+    # power line shows, the raw vmx displayName does not.
+    assert result.output.strip() == "box\n  power:    on"
 
 
 # --------------------------------------------------------------------------- #
-# excluded commands (no vm key)                                               #
+# auth set (no vm key; config write)                                          #
 # --------------------------------------------------------------------------- #
 
 
-def test_auth_set_requires_name_and_has_no_vm_key(run):
-    result, payload = run(["auth", "set", "myvm", "--user", "u", "--password", "p"])
+def test_auth_set_renders_confirmation(run):
+    result, ctl = run(["auth", "set", "myvm", "--user", "u", "--password", "p"])
     assert result.exit_code == 0
-    assert payload == {"success": True}
-    assert "vm" not in payload
+    assert result.output.strip() == "credentials set for myvm"
+    assert ctl.cred_calls == [("myvm", "u", "p")]
 
 
 def test_auth_set_without_name_is_usage_error(run):
@@ -682,7 +707,7 @@ def test_auth_set_without_name_is_usage_error(run):
 # --------------------------------------------------------------------------- #
 
 
-def test_clone_adds_vm_key_and_uses_canonical_name(monkeypatch):
+def test_clone_renders_confirmation_and_uses_canonical_name(monkeypatch):
     captured = {}
 
     def make_ctl():
@@ -692,9 +717,8 @@ def test_clone_adds_vm_key_and_uses_canonical_name(monkeypatch):
 
     monkeypatch.setattr(cli_mod, "VMCtl", make_ctl)
     result = CliRunner().invoke(cli, ["clone", "SRC", "dest"])
-    payload = json.loads(result.output)
     assert result.exit_code == 0
-    assert payload["vm"] == "src"
+    assert result.output.strip() == "cloned src -> dest"
     assert captured["ctl"].clone_calls == [("src", "dest", False)]
 
 
@@ -708,10 +732,23 @@ def test_clone_leading_dashdash_auto_selects(monkeypatch):
 
     monkeypatch.setattr(cli_mod, "VMCtl", make_ctl)
     result = CliRunner().invoke(cli, ["clone", "--", "dest"])
-    payload = json.loads(result.output)
     assert result.exit_code == 0
-    assert payload["vm"] == "box"
+    assert result.output.strip() == "cloned box -> dest"
     assert captured["ctl"].clone_calls == [("box", "dest", False)]
+
+
+# --------------------------------------------------------------------------- #
+# error output contract (ADR-0007)                                            #
+# --------------------------------------------------------------------------- #
+
+
+def test_error_is_single_lowercase_line_on_stderr(monkeypatch):
+    # `error: <msg>` on stderr, exit 1, clean stdout (no JSON wrapper).
+    monkeypatch.setattr(cli_mod, "VMCtl", lambda: FakeCtl(running=()))
+    result = CliRunner().invoke(cli, ["stop"])
+    assert result.exit_code == 1
+    assert result.stdout == ""  # stdout stays clean for pipes
+    assert result.stderr.strip() == "error: no running VM to auto-select; pass a name"
 
 
 # --------------------------------------------------------------------------- #
@@ -752,53 +789,49 @@ def test_removed_commands_are_gone(run, argv):
 
 
 def test_clipboard_push_explicit_text(run):
-    result, payload = run(["clipboard", "push", "myvm", "hello world"])
+    result, ctl = run(["clipboard", "push", "myvm", "hello world"])
     assert result.exit_code == 0
-    assert payload["vm"] == "myvm"
-    assert payload["called"] == "push_text"
-    assert payload["args"] == ["hello world"]
+    assert result.output.strip() == "clipboard set on myvm"
+    push = _last(ctl, "push_text")
+    assert push["args"] == ["hello world"]
 
 
 def test_clipboard_pull_auto_selects(run):
-    result, payload = run(["clipboard", "pull"], running=("box",))
+    result, ctl = run(["clipboard", "pull"], running=("box",))
     assert result.exit_code == 0
-    assert payload["vm"] == "box"
-    assert payload["called"] == "pull_text"
+    assert _last(ctl, "pull_text")["module"] == "clipboard"
 
 
 def test_clipboard_push_reads_piped_stdin(monkeypatch):
-    monkeypatch.setattr(cli_mod, "VMCtl", lambda: FakeCtl(("box",)))
+    ctl = FakeCtl(("box",))
+    monkeypatch.setattr(cli_mod, "VMCtl", lambda: ctl)
     result = CliRunner().invoke(cli, ["clipboard", "push"], input="piped text")
-    payload = json.loads(result.output)
     assert result.exit_code == 0
-    assert payload["vm"] == "box"
-    assert payload["args"] == ["piped text"]
+    assert result.output.strip() == "clipboard set on box"
+    assert _last(ctl, "push_text")["args"] == ["piped text"]
 
 
 def test_clipboard_push_empty_stdin_errors(monkeypatch):
     monkeypatch.setattr(cli_mod, "VMCtl", lambda: FakeCtl(("box",)))
     result = CliRunner().invoke(cli, ["clipboard", "push"])
-    payload = json.loads(result.output)
     assert result.exit_code == 1
-    assert "clipboard text is empty" in payload["error"]
-    assert "push -- TEXT" in payload["error"]
+    assert "clipboard text is empty" in result.output
+    assert "push -- TEXT" in result.output
 
 
 def test_clipboard_push_lone_arg_gives_actionable_footgun_error(monkeypatch):
     monkeypatch.setattr(cli_mod, "VMCtl", lambda: FakeCtl(("box",)))
     result = CliRunner().invoke(cli, ["clipboard", "push", "hello"])
-    payload = json.loads(result.output)
     assert result.exit_code == 1
-    err = payload["error"]
-    assert "'hello' was read as the VM name" in err
-    assert "clipboard push -- hello" in err
+    assert "'hello' was read as the VM name" in result.output
+    assert "clipboard push -- hello" in result.output
 
 
 def test_clipboard_push_dashdash_makes_lone_arg_text(run):
-    result, payload = run(["clipboard", "push", "--", "hello"], running=("box",))
+    result, ctl = run(["clipboard", "push", "--", "hello"], running=("box",))
     assert result.exit_code == 0
-    assert payload["vm"] == "box"
-    assert payload["args"] == ["hello"]
+    assert result.output.strip() == "clipboard set on box"
+    assert _last(ctl, "push_text")["args"] == ["hello"]
 
 
 # --------------------------------------------------------------------------- #
@@ -823,7 +856,7 @@ class SyncRecorder:
 
 class SyncVM(FakeVM):
     def __init__(self, name, recorder):
-        super().__init__(name)
+        super().__init__(name, [])
         self._rec = recorder
 
     @property
@@ -843,45 +876,40 @@ def sync_run(monkeypatch):
 
         monkeypatch.setattr(cli_mod, "VMCtl", lambda: Ctl(running))
         result = CliRunner().invoke(cli, args)
-        try:
-            payload = json.loads(result.output)
-        except (json.JSONDecodeError, ValueError):
-            payload = None
-        return result, payload, rec
+        return result, rec
     return _run
 
 
 def test_sync_explicit_name(sync_run):
-    result, payload, rec = sync_run(["sync", "myvm", "--optional"])
+    result, rec = sync_run(["sync", "myvm", "--optional"])
     assert result.exit_code == 0
-    assert payload["vm"] == "myvm"
+    assert result.output.strip() == "synced myvm"
     assert rec.calls == [("run", True, None, None, None)]
 
 
 def test_sync_bare_auto_selects(sync_run):
-    result, payload, rec = sync_run(["sync"], running=("box",))
+    result, rec = sync_run(["sync"], running=("box",))
     assert result.exit_code == 0
-    assert payload["vm"] == "box"
+    assert result.output.strip() == "synced box"
     assert rec.calls == [("run", False, None, None, None)]
 
 
 def test_push_explicit_name_binds_positionals(sync_run):
-    result, payload, rec = sync_run(["push", "myvm", "./build", r"C:\app"])
+    result, rec = sync_run(["push", "myvm", "./build", r"C:\app"])
     assert result.exit_code == 0
-    assert payload["vm"] == "myvm"
+    assert result.output.strip() == r"pushed ./build -> myvm:C:\app"
     assert rec.calls == [("push", "./build", r"C:\app", None, None)]
 
 
 def test_push_leading_dashdash_auto_selects(sync_run):
-    result, payload, rec = sync_run(["push", "--", "./build", r"C:\app"],
-                                    running=("box",))
+    result, rec = sync_run(["push", "--", "./build", r"C:\app"], running=("box",))
     assert result.exit_code == 0
-    assert payload["vm"] == "box"
+    assert result.output.strip() == r"pushed ./build -> box:C:\app"
     assert rec.calls == [("push", "./build", r"C:\app", None, None)]
 
 
 def test_push_passes_credential_override(sync_run):
-    result, _, rec = sync_run(
+    result, rec = sync_run(
         ["push", "myvm", "./build", r"C:\app", "-u", "cli", "-p", "new"])
     assert result.exit_code == 0
     assert rec.calls == [("push", "./build", r"C:\app", "cli", "new")]

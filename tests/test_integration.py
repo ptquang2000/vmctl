@@ -24,7 +24,6 @@ stdout, so tests write an artifact to a known guest path, copy it back to the
 host, and assert on the host-side content.
 """
 
-import json
 import os
 import socket
 import subprocess
@@ -466,8 +465,9 @@ def test_clipboard_push_pipes_stdin_via_cli(clipboard_vm):
         capture_output=True,
     )
     assert proc.returncode == 0, proc.stderr.decode("utf-8", "replace")
-    payload = json.loads(proc.stdout.decode("utf-8"))
-    assert payload == {"vm": VM_NAME, "success": True}
+    # The CLI renders a human confirmation naming the auto-selected VM
+    # (ADR-0007); structured data is the library's contract, not the CLI's.
+    assert proc.stdout.decode("utf-8").strip() == f"clipboard set on {VM_NAME}"
 
     result = clipboard_vm.clipboard.pull_text()
     assert result["text"].strip() == text

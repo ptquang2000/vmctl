@@ -1,16 +1,23 @@
 # vmctl
 
-A JSON-native Python API and command-line wrapper around the VMware Workstation
-CLI tools (`vmcli.exe` and `vmrun.exe`). `vmctl` turns the two stock binaries
-into a single clean interface: every command returns structured JSON, VMs are
-addressed by name (auto-discovered from configured scan roots), and quirks of
-the underlying tools are smoothed over so you don't have to remember which
-operation needs `vmrun` versus `vmcli`.
+A Python API and command-line wrapper around the VMware Workstation CLI tools
+(`vmcli.exe` and `vmrun.exe`). `vmctl` turns the two stock binaries into a single
+clean interface split by audience (ADR-0007): the **library** is JSON-native —
+every method returns a `dict` — while the **CLI** renders human-readable,
+docker/git-style text. VMs are addressed by name (auto-discovered from configured
+scan roots), and quirks of the underlying tools are smoothed over so you don't
+have to remember which operation needs `vmrun` versus `vmcli`.
 
 ## Features
 
-- **JSON everywhere** — every CLI command prints indented JSON; every library
-  method returns a `dict`.
+- **Output split by audience (ADR-0007)** — the library returns native `dict`s
+  (the structured, programmatic interface); the CLI renders human text and never
+  emits JSON. Collections print as aligned tables (`ps`, `snapshot log`,
+  `network ls`, `peripheral ls`), value-reads print the bare value so they pipe
+  (`vmctl network ip`, `vmctl clipboard pull`), mutations print a terse
+  confirmation naming the VM (`started windows-10-x64`), and errors are a single
+  `error: <msg>` line on stderr. Want structured data from a script? Import the
+  library.
 - **Name-based VM lookup** — reference VMs by name instead of `.vmx` paths; they
   are discovered by scanning configured roots.
 - **docker/git-flavored CLI** — VM lifecycle reads like docker (`ps`, `start`,
@@ -19,8 +26,8 @@ operation needs `vmrun` versus `vmcli`.
   folders (HGFS), clipboard, and VMX inspection.
 - **Quirk handling baked in** — power mutations are routed through `vmrun`
   (which doesn't require the `__vmware__` group), HGFS shares are written via
-  `ConfigParams` (the `HGFS Set*` commands are broken), and JSON output with
-  stray text prefixes is parsed correctly.
+  `ConfigParams` (the `HGFS Set*` commands are broken), and vmcli's JSON output
+  with stray text prefixes is parsed correctly.
 
 ## Requirements
 
@@ -198,8 +205,8 @@ Each `VM` exposes the same subsystems as the CLI groups: `power`, `snapshot`,
   (`cmd.exe /c start "" …` / `sh -c '… &'`) to get PATH, builtins, pipes, and
   multiple args, detaching the program so the call returns at launch.
 - **GUI programs need `exec -i` (or `-it`).** Without `-i` the program runs in
-  the non-interactive Session 0, so any window it opens is invisible (the call
-  still reports `"success": true` because the process launched). `-i` places it
+  the non-interactive Session 0, so any window it opens is invisible (the CLI
+  still prints `launched on <vm>` because the process launched). `-i` places it
   on the interactive desktop but does **not** search the guest `PATH`, so the
   program must be an **absolute path**; `-it` adds the shell wrap so a bare name
   (`vmctl exec -it notepad`) resolves via PATH and the window still appears.

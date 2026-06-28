@@ -1,6 +1,6 @@
 # vmctl Context
 
-vmctl wraps VMware Workstation's `vmcli.exe` and `vmrun.exe` into a JSON-native Python API and CLI. This file records domain terms and conventions not obvious from the code. Deep rationale lives in `docs/adr/`.
+vmctl wraps VMware Workstation's `vmcli.exe` and `vmrun.exe` into a **JSON-native Python API** and a **human-readable CLI** (ADR-0007): the library returns native dicts for programmatic callers; the CLI renders docker/git-style text and never emits JSON. This file records domain terms and conventions not obvious from the code. Deep rationale lives in `docs/adr/`.
 
 ## Language
 
@@ -39,7 +39,7 @@ Every VM command takes the VM **name** as its first positional, which may be **o
 - **Scope** = all VM-operating commands except `vm list` and `auth set` (a config write keyed by name).
 - **Leading `--` is a custom marker, not Click's terminator.** If the first token after the subcommand is `--`, the CLI strips it, auto-resolves, and hands the rest to Click. Only the *leading* `--` is special (`snapshot take -- s1 --memory` still parses `--memory`).
 - **No silent count-based fill** — `snapshot take myvm` (forgot snap name) is a clean missing-argument error; `myvm` is never reinterpreted.
-- **Every result carries a `vm` key** (canonical registry name) for uniform output `{"vm": "<name>", …}`.
+- **Every *library* result carries a `vm` key** (canonical registry name) for uniform dict shape `{"vm": "<name>", …}`. The **CLI** does not surface this as a field — it becomes the table header / the name in a confirmation line (see "CLI output rendering").
 - **Reverse-mapping** a running `.vmx` to its name (for cred lookup) inverts the registry case-insensitively / path-normalized.
 - **Failure modes:** zero running → `no running VM to auto-select; pass a name`; ≥2 → error listing them, `pass a name`.
 
@@ -73,6 +73,36 @@ verbs flatten to the top level, everything else stays grouped.
 - **Removed:** the `power` group (flattened), the `guest` group (`guest ps`/
   `kill` dropped so `ps`/`kill` are free for docker meaning), and `fs`,
   `tools`, `vars`, `mks` entirely.
+
+## CLI output rendering — human text, JSON is library-only (ADR-0007)
+
+The CLI **never emits JSON**; raw JSON is the *library's* return contract for
+programmatic callers. The CLI renders docker/git-style text (extends ADR-0006
+from verbs to output). Rendering lives in pure `vmctl/render.py` (`dict -> str`,
+no Click) so it's unit-tested as strings.
+
+- **Collections → aligned tables.** `ps`/`peripheral ls` docker-style;
+  `snapshot log` git-log-ish (`*` current-marker); `network ls` plain table.
+  Booleans → `yes`/`no`; unknown/`null` (USB `connected`) → `-`. Empty → header
+  row only.
+- **Scalar value-reads stay bare** (`network ip`, `clipboard pull`): the value
+  alone, no label/`vm:` prefix, so they're **pipeable**. Empty IP → blank line.
+- **Mutations → `verb + canonical name`** (`started windows-10-x64`).
+  Synthesized in the CLI (library returns are contentless `{"success": True}`);
+  naming the VM discloses auto-select.
+- **`exec`** → `launched on <vm>` (no guest stdout to return — ADR-0006).
+  **`cp`** → `copied <src> -> <vm>:<dest>`. **`push`/`sync`** → progress on
+  stderr, `pushed …`/`synced <vm>` on stdout. **`auth set`** →
+  `credentials set for <name>`.
+- **`inspect` → curated summary** (power/identity header + the snapshot/disk/
+  network/tools tables), **not** the full dump — the exhaustive 10-query +
+  `.vmx`/`.vmsd` data stays available via the library (`vm.inspect.inspect()` +
+  `parse_vmx()`). A debug dump is the use case meant to drop into the library.
+- **Errors → `error: <msg>`** on stderr, exit 1; stdout stays clean for pipes.
+- _Verified live (2026-06-28):_ `Snapshot query` exposes `currentUID` (drives the
+  `snapshot log` `*` marker); `Ethernet query` devices carry
+  `label`/`connectionType`/`networkName`/`connectionStatus` (the `network ls`
+  columns). `Tools Query` uses `running` + `version` (the `inspect` tools facts).
 
 ## snapshot reset lifecycle (ADR-0002, ADR-0006)
 

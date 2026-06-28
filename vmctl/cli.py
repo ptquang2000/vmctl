@@ -1,9 +1,8 @@
-import json
 import sys
 
 import click
 
-from . import VMCtl, VMCtlError
+from . import VMCtl, VMCtlError, render
 from .registry import _normalize_path
 
 
@@ -24,17 +23,10 @@ _ALIASES = {
 }
 
 
-def _out(data: dict) -> None:
-    click.echo(json.dumps(data, indent=2))
-
-
-def _out_vm(vm, data: dict) -> None:
-    """Emit a command result prefixed with the canonical VM name."""
-    _out({"vm": vm.name, **data})
-
-
 def _err(msg: str) -> None:
-    click.echo(json.dumps({"error": msg}), err=True)
+    """Emit a single ``error: <msg>`` line on stderr and exit non-zero, keeping
+    stdout clean for pipes (ADR-0007)."""
+    click.echo(f"error: {msg}", err=True)
     sys.exit(1)
 
 
@@ -118,7 +110,8 @@ def cli():
     The command surface mirrors docker/git: `ps`, `start`, `stop`, `kill`,
     `restart`, `exec`, `cp`, `inspect`, plus `snapshot` (git-style log/commit/
     reset/rm) and grouped `network`/`peripheral`/`shares`/`clipboard` commands.
-    Every result is JSON on stdout.
+    Output is human-readable text; for structured data import the library
+    (`VMCtl(...)`), which returns native dicts.
 
     The leading VM name is optional on VM commands: omit it to auto-select the
     single running in-scope VM. When other positionals follow, mark the omitted
@@ -154,7 +147,7 @@ def _ps_rows(data: dict, show_all: bool) -> list:
 def cmd_ps(show_all):
     """List running VMs (docker `ps`); `-a` includes stopped ones."""
     try:
-        _out({"vms": _ps_rows(_vmctl().list_vms(), show_all)})
+        click.echo(render.ps(_ps_rows(_vmctl().list_vms(), show_all)))
     except (VMCtlError, ValueError) as e:
         _err(str(e))
 
@@ -172,7 +165,8 @@ def cmd_start(name, paused):
     default. Use `-P` to boot headless."""
     try:
         vm = _resolve(name)
-        _out_vm(vm, vm.power.start(paused=paused))
+        vm.power.start(paused=paused)
+        click.echo(render.confirm("started", vm.name))
     except (VMCtlError, ValueError) as e:
         _err(str(e))
 
@@ -183,7 +177,8 @@ def cmd_stop(name):
     """Gracefully shut down the guest. Use `kill` for a hard power-off."""
     try:
         vm = _resolve(name)
-        _out_vm(vm, vm.power.stop(hard=False))
+        vm.power.stop(hard=False)
+        click.echo(render.confirm("stopped", vm.name))
     except (VMCtlError, ValueError) as e:
         _err(str(e))
 
@@ -194,7 +189,8 @@ def cmd_kill(name):
     """Hard power-off the VM (docker `kill`); pulls the virtual plug."""
     try:
         vm = _resolve(name)
-        _out_vm(vm, vm.power.stop(hard=True))
+        vm.power.stop(hard=True)
+        click.echo(render.confirm("killed", vm.name))
     except (VMCtlError, ValueError) as e:
         _err(str(e))
 
@@ -209,7 +205,8 @@ def cmd_restart(name, hard):
     reset."""
     try:
         vm = _resolve(name)
-        _out_vm(vm, vm.power.reset(hard=hard))
+        vm.power.reset(hard=hard)
+        click.echo(render.confirm("restarted", vm.name))
     except (VMCtlError, ValueError) as e:
         _err(str(e))
 
@@ -221,7 +218,8 @@ def cmd_pause(name):
     stays in RAM and the VM keeps reporting as on."""
     try:
         vm = _resolve(name)
-        _out_vm(vm, vm.power.pause())
+        vm.power.pause()
+        click.echo(render.confirm("paused", vm.name))
     except (VMCtlError, ValueError) as e:
         _err(str(e))
 
@@ -232,7 +230,8 @@ def cmd_unpause(name):
     """Resume a VM frozen with `pause` (docker `unpause`)."""
     try:
         vm = _resolve(name)
-        _out_vm(vm, vm.power.unpause())
+        vm.power.unpause()
+        click.echo(render.confirm("unpaused", vm.name))
     except (VMCtlError, ValueError) as e:
         _err(str(e))
 
@@ -244,7 +243,8 @@ def cmd_suspend(name):
     it left off; unlike `pause` the VM is no longer running."""
     try:
         vm = _resolve(name)
-        _out_vm(vm, vm.power.suspend())
+        vm.power.suspend()
+        click.echo(render.confirm("suspended", vm.name))
     except (VMCtlError, ValueError) as e:
         _err(str(e))
 
@@ -264,7 +264,8 @@ def cmd_clone(name, dest, linked):
     try:
         ctl = _vmctl()
         vm = ctl.resolve(None if (name is None or name == _AUTO) else name)
-        _out_vm(vm, ctl.clone(vm.name, dest, linked))
+        ctl.clone(vm.name, dest, linked)
+        click.echo(render.cloned(vm.name, dest))
     except (VMCtlError, ValueError) as e:
         _err(str(e))
 
@@ -327,8 +328,9 @@ def cmd_exec(name, interactive, tty, program_args):
         program, args = _build_exec(program_args, guest_os, tty)
         # -i launches fire-and-forget (--noWait); headless modes wait on the
         # launch (which is immediate for -t, since the program detaches).
-        _out_vm(vm, vm.guest.run(
-            program, *args, no_wait=interactive, interactive=interactive))
+        vm.guest.run(
+            program, *args, no_wait=interactive, interactive=interactive)
+        click.echo(render.exec_launched(vm.name))
     except (VMCtlError, ValueError) as e:
         _err(str(e))
 
@@ -376,10 +378,12 @@ def cmd_cp(src, dst, overwrite):
             )
         if dst_vm is not None:
             vm = _resolve(None if dst_vm == "" else dst_vm)
-            _out_vm(vm, vm.guest.copy_to(src_path, dst_path, overwrite=overwrite))
+            vm.guest.copy_to(src_path, dst_path, overwrite=overwrite)
+            click.echo(render.copied(src_path, f"{vm.name}:{dst_path}"))
         else:
             vm = _resolve(None if src_vm == "" else src_vm)
-            _out_vm(vm, vm.guest.copy_from(src_path, dst_path, overwrite=overwrite))
+            vm.guest.copy_from(src_path, dst_path, overwrite=overwrite)
+            click.echo(render.copied(f"{vm.name}:{src_path}", dst_path))
     except (VMCtlError, ValueError) as e:
         _err(str(e))
 
@@ -390,13 +394,14 @@ def cmd_cp(src, dst, overwrite):
 @cli.command("inspect", cls=VMCommand)
 @click.argument("name", required=False)
 def cmd_inspect(name):
-    """Show full VM state: live queries (power, disks, network, …) plus the
-    parsed .vmx/.vmsd dump."""
+    """Show a curated VM summary: power/identity plus snapshot, disk, network,
+    and tools tables. For the exhaustive structured dump import the library
+    (`vm.inspect.inspect()` + `parse_vmx()`)."""
     try:
         vm = _resolve(name)
         data = vm.inspect.inspect()
         data.update(vm.inspect.parse_vmx())
-        _out_vm(vm, data)
+        click.echo(render.inspect(data, vm.name))
     except (VMCtlError, ValueError) as e:
         _err(str(e))
 
@@ -419,7 +424,7 @@ def auth_set(name, user, password):
     sync, …) use these credentials to authenticate into the guest OS."""
     try:
         _vmctl().set_credentials(name, user, password)
-        _out({"success": True})
+        click.echo(render.auth_set(name))
     except Exception as e:
         _err(str(e))
 
@@ -439,7 +444,7 @@ def snapshot_log(name):
     """List snapshots (git `log`)."""
     try:
         vm = _resolve(name)
-        _out_vm(vm, vm.snapshot.list())
+        click.echo(render.snapshot_log(vm.snapshot.list()))
     except (VMCtlError, ValueError) as e:
         _err(str(e))
 
@@ -459,7 +464,8 @@ def snapshot_commit(name, snap_name, message, disk_only):
             memory = False
         else:
             memory = vm.power.state().get("PowerState") == "on"
-        _out_vm(vm, vm.snapshot.take(snap_name, memory=memory, description=message))
+        vm.snapshot.take(snap_name, memory=memory, description=message)
+        click.echo(render.snapshot_committed(vm.name, snap_name))
     except (VMCtlError, ValueError) as e:
         _err(str(e))
 
@@ -471,7 +477,8 @@ def snapshot_reset(name, snap_name):
     """Discard current state and jump back to a snapshot (git `reset --hard`)."""
     try:
         vm = _resolve(name)
-        _out_vm(vm, vm.snapshot.revert(snap_name, ensure_running=True))
+        vm.snapshot.revert(snap_name, ensure_running=True)
+        click.echo(render.snapshot_reset(vm.name, snap_name))
     except (VMCtlError, ValueError) as e:
         _err(str(e))
 
@@ -485,7 +492,8 @@ def snapshot_rm(name, snap_name, delete_children):
     """Delete a snapshot (docker `rm`)."""
     try:
         vm = _resolve(name)
-        _out_vm(vm, vm.snapshot.delete(snap_name, delete_children=delete_children))
+        vm.snapshot.delete(snap_name, delete_children=delete_children)
+        click.echo(render.snapshot_removed(vm.name, snap_name))
     except (VMCtlError, ValueError) as e:
         _err(str(e))
 
@@ -506,7 +514,7 @@ def network_ls(name):
     MAC, network name)."""
     try:
         vm = _resolve(name)
-        _out_vm(vm, vm.network.list())
+        click.echo(render.network_ls(vm.network.list()))
     except (VMCtlError, ValueError) as e:
         _err(str(e))
 
@@ -518,7 +526,7 @@ def network_ip(name):
     the guest has no IP yet; the VM must be powered on."""
     try:
         vm = _resolve(name)
-        _out_vm(vm, vm.network.ip())
+        click.echo(render.network_ip(vm.network.ip()))
     except (VMCtlError, ValueError) as e:
         _err(str(e))
 
@@ -530,7 +538,8 @@ def network_connect(name, label):
     """Connect (plug in) the network adapter LABEL."""
     try:
         vm = _resolve(name)
-        _out_vm(vm, vm.network.connect(label))
+        vm.network.connect(label)
+        click.echo(render.network_connected(vm.name, label))
     except (VMCtlError, ValueError) as e:
         _err(str(e))
 
@@ -542,7 +551,8 @@ def network_disconnect(name, label):
     """Disconnect (unplug) the network adapter LABEL."""
     try:
         vm = _resolve(name)
-        _out_vm(vm, vm.network.disconnect(label))
+        vm.network.disconnect(label)
+        click.echo(render.network_disconnected(vm.name, label))
     except (VMCtlError, ValueError) as e:
         _err(str(e))
 
@@ -555,7 +565,8 @@ def network_set_type(name, label, type_):
     """Set adapter LABEL's connection type TYPE_ (e.g. bridged, nat, hostonly)."""
     try:
         vm = _resolve(name)
-        _out_vm(vm, vm.network.set_type(label, type_))
+        vm.network.set_type(label, type_)
+        click.echo(render.network_type_set(vm.name, label, type_))
     except (VMCtlError, ValueError) as e:
         _err(str(e))
 
@@ -568,7 +579,8 @@ def network_set_name(name, label, network_name):
     """Set adapter LABEL's virtual network name (e.g. VMnet0)."""
     try:
         vm = _resolve(name)
-        _out_vm(vm, vm.network.set_name(label, network_name))
+        vm.network.set_name(label, network_name)
+        click.echo(render.network_name_set(vm.name, label, network_name))
     except (VMCtlError, ValueError) as e:
         _err(str(e))
 
@@ -589,7 +601,7 @@ def peripheral_ls(name):
     Copy an `id` to use with connect/disconnect/mount-iso."""
     try:
         vm = _resolve(name)
-        _out_vm(vm, vm.peripheral.list())
+        click.echo(render.peripheral_ls(vm.peripheral.list()))
     except (VMCtlError, ValueError) as e:
         _err(str(e))
 
@@ -602,7 +614,8 @@ def peripheral_mount_iso(name, label, iso_path):
     """Back the CD/DVD drive LABEL with the ISO at ISO_PATH (host-side path)."""
     try:
         vm = _resolve(name)
-        _out_vm(vm, vm.peripheral.mount_iso(label, iso_path))
+        vm.peripheral.mount_iso(label, iso_path)
+        click.echo(render.iso_mounted(vm.name, label, iso_path))
     except (VMCtlError, ValueError) as e:
         _err(str(e))
 
@@ -615,7 +628,8 @@ def peripheral_connect(name, device_id):
     The device type is resolved from the id; no type needs to be supplied."""
     try:
         vm = _resolve(name)
-        _out_vm(vm, vm.peripheral.connect(device_id))
+        vm.peripheral.connect(device_id)
+        click.echo(render.peripheral_connected(vm.name, device_id))
     except (VMCtlError, ValueError) as e:
         _err(str(e))
 
@@ -628,7 +642,8 @@ def peripheral_disconnect(name, device_id):
     The device type is resolved from the id; no type needs to be supplied."""
     try:
         vm = _resolve(name)
-        _out_vm(vm, vm.peripheral.disconnect(device_id))
+        vm.peripheral.disconnect(device_id)
+        click.echo(render.peripheral_disconnected(vm.name, device_id))
     except (VMCtlError, ValueError) as e:
         _err(str(e))
 
@@ -649,7 +664,7 @@ def shares_ls(name):
     flags."""
     try:
         vm = _resolve(name)
-        _out_vm(vm, vm.shares.list())
+        click.echo(render.shares_ls(vm.shares.list()))
     except (VMCtlError, ValueError) as e:
         _err(str(e))
 
@@ -667,7 +682,8 @@ def shares_add(name, host_path, writable, guest_name):
     pass that label to remove/set-* commands."""
     try:
         vm = _resolve(name)
-        _out_vm(vm, vm.shares.add(host_path, writable=writable, guest_name=guest_name))
+        data = vm.shares.add(host_path, writable=writable, guest_name=guest_name)
+        click.echo(render.shares_added(vm.name, data.get("label", ""), host_path))
     except (VMCtlError, ValueError) as e:
         _err(str(e))
 
@@ -679,7 +695,8 @@ def shares_remove(name, label):
     """Remove the HGFS share LABEL."""
     try:
         vm = _resolve(name)
-        _out_vm(vm, vm.shares.remove(label))
+        vm.shares.remove(label)
+        click.echo(render.shares_removed(vm.name, label))
     except (VMCtlError, ValueError) as e:
         _err(str(e))
 
@@ -692,7 +709,8 @@ def shares_set_path(name, label, host_path):
     """Repoint share LABEL at a different host directory HOST_PATH."""
     try:
         vm = _resolve(name)
-        _out_vm(vm, vm.shares.set_path(label, host_path))
+        vm.shares.set_path(label, host_path)
+        click.echo(render.shares_updated(vm.name, label))
     except (VMCtlError, ValueError) as e:
         _err(str(e))
 
@@ -705,7 +723,8 @@ def shares_set_writable(name, label, value):
     """Set whether the guest may write to share LABEL (VALUE: true|false)."""
     try:
         vm = _resolve(name)
-        _out_vm(vm, vm.shares.set_writable(label, value == "true"))
+        vm.shares.set_writable(label, value == "true")
+        click.echo(render.shares_updated(vm.name, label))
     except (VMCtlError, ValueError) as e:
         _err(str(e))
 
@@ -718,7 +737,8 @@ def shares_set_enabled(name, label, value):
     """Enable or disable share LABEL without removing it (VALUE: true|false)."""
     try:
         vm = _resolve(name)
-        _out_vm(vm, vm.shares.set_enabled(label, value == "true"))
+        vm.shares.set_enabled(label, value == "true")
+        click.echo(render.shares_updated(vm.name, label))
     except (VMCtlError, ValueError) as e:
         _err(str(e))
 
@@ -731,7 +751,8 @@ def shares_set_guest_name(name, label, guest_name):
     """Rename how share LABEL appears inside the guest to GUEST_NAME."""
     try:
         vm = _resolve(name)
-        _out_vm(vm, vm.shares.set_guest_name(label, guest_name))
+        vm.shares.set_guest_name(label, guest_name)
+        click.echo(render.shares_updated(vm.name, label))
     except (VMCtlError, ValueError) as e:
         _err(str(e))
 
@@ -770,7 +791,8 @@ def clipboard_push(name, text):
                 )
             _err("clipboard text is empty (pipe it, or use `clipboard push -- TEXT`)")
         vm = _resolve(name)
-        _out_vm(vm, vm.clipboard.push_text(text))
+        vm.clipboard.push_text(text)
+        click.echo(render.clipboard_pushed(vm.name))
     except (VMCtlError, ValueError) as e:
         _err(str(e))
 
@@ -781,7 +803,7 @@ def clipboard_pull(name):
     """Read the guest clipboard's current text and print it."""
     try:
         vm = _resolve(name)
-        _out_vm(vm, vm.clipboard.pull_text())
+        click.echo(render.clipboard_pull(vm.clipboard.pull_text()))
     except (VMCtlError, ValueError) as e:
         _err(str(e))
 
@@ -790,7 +812,7 @@ def clipboard_pull(name):
 # sync / push (file-sync into the running guest, via sss)
 # ---------------------------------------------------------------------------
 def _log_stderr(msg: str) -> None:
-    """Sync/push progress callback: progress on stderr, JSON result on stdout."""
+    """Sync/push progress callback: progress on stderr, confirmation on stdout."""
     click.echo(msg, err=True)
 
 
@@ -815,10 +837,11 @@ def cmd_sync(name, optional, project_dir, user, password):
     use `vmctl cp`."""
     try:
         vm = _resolve(name)
-        _out_vm(vm, vm.sync.run(
+        vm.sync.run(
             sync_optional=optional, project_dir=project_dir, log=_log_stderr,
             user=user, password=password,
-        ))
+        )
+        click.echo(render.synced(vm.name))
     except (VMCtlError, ValueError) as e:
         _err(str(e))
 
@@ -840,7 +863,7 @@ def cmd_push(name, source, dest, user, password):
     size limit. Auto-select with a leading `--`: `vmctl push -- ./build C:\\app`."""
     try:
         vm = _resolve(name)
-        _out_vm(vm, vm.sync.push(source, dest, log=_log_stderr,
-                                 user=user, password=password))
+        vm.sync.push(source, dest, log=_log_stderr, user=user, password=password)
+        click.echo(render.pushed(source, f"{vm.name}:{dest}"))
     except (VMCtlError, ValueError) as e:
         _err(str(e))
