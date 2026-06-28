@@ -1,4 +1,4 @@
-# Docker-/git-flavored command surface
+# Restructured command surface
 
 ## Status
 
@@ -9,48 +9,47 @@ accepted
 The CLI verbs and grouping had grown ad hoc — `power start`, `snapshot take`,
 `guest run`/`copy-to`, plus low-value groups (`fs`, `tools`, `vars`, `mks`) —
 and were "not universal and hard to use." The user asked to align the surface
-with two tools everyone already knows: **VM lifecycle should read like docker**,
-**snapshots should read like git**.
+with concise, familiar CLI conventions: **high-frequency VM-lifecycle
+operations should be short top-level verbs**, and **snapshots should be a verb
+group**.
 
 We adopt a **hybrid** structure (not fully flat): the high-frequency
-container-lifecycle and exec/copy verbs are **promoted to the top level**
-(docker-style, where the VM is the container), while domains docker has no
-vocabulary for stay as **named groups** (`snapshot`, `network`, `peripheral`,
-`shares`, `clipboard`, `auth`, `sync`/`push`). `snapshot` keeps its group
-because `git` is itself a subcommand group, so `vmctl snapshot <verb>` is
-already git-idiomatic.
+lifecycle and exec/copy verbs are **promoted to the top level** (the VM is the
+implicit subject), while specialized domains stay as **named groups**
+(`snapshot`, `network`, `shares`, `clipboard`, `auth`, `sync`/`push`).
+`snapshot` keeps its group because its verbs form a natural namespace, so
+`vmctl snapshot <verb>` reads cleanly.
 
 ### Target surface
 
-Top level (docker):
+Top level:
 
 | New | Was | Notes |
 |---|---|---|
 | `ps [-a]` | `vm list` | **lists running VMs**; `-a` includes stopped/suspended |
 | `start [vm] [-P]` | `power start` | |
 | `stop [vm]` | `power stop` | graceful |
-| `kill [vm]` | `power stop --hard` | hard power-off (docker `kill`) |
+| `kill [vm]` | `power stop --hard` | hard power-off |
 | `restart [vm] [-H]` | `power reset` | |
 | `pause` / `unpause [vm]` | `power pause`/`unpause` | |
-| `suspend [vm]` | `power suspend` | kept — no docker analog |
+| `suspend [vm]` | `power suspend` | kept |
 | `inspect [vm]` | `inspect` + `power state` + `parse-vmx` | absorbs state/vmx dump |
-| `clone [vm] <dest>` | `vm clone` | VMware term; no docker analog |
-| `exec [vm] <cmd…>` | `guest run` | docker `exec`; headless by default, `-t` shell, `-i` desktop, `-it` both |
+| `clone [vm] <dest>` | `vm clone` | VMware term |
+| `exec [vm] <cmd…>` | `guest run` | headless by default, `-t` shell, `-i` desktop, `-it` both |
 | `cp <src> <dst>` | `guest copy-to` + `copy-from` | merged; `vm:path` syntax |
 
-`snapshot` group (git):
+`snapshot` group:
 
 | New | Was | Notes |
 |---|---|---|
 | `snapshot log` | `snapshot list` | |
 | `snapshot commit <name> -m <msg>` | `snapshot take` | memory-default; `--disk-only` escape |
-| `snapshot reset <name>` | `snapshot revert` | discard-and-jump = `git reset --hard` |
+| `snapshot reset <name>` | `snapshot revert` | discard current state and jump to the snapshot |
 | `snapshot rm <name> [-c]` | `snapshot delete` | |
 
 Kept groups, `list`→`ls` for consistency: `network` (ls/ip/connect/disconnect/
-set-type/set-name), `peripheral` (ls/connect/disconnect/mount-iso), `shares`
-(ls/add/remove/set-*). Unchanged: `clipboard push/pull`, `auth set`, top-level
-`sync`/`push`.
+set-type/set-name), `shares` (ls/add/remove/set-*). Unchanged: `clipboard
+push/pull`, `auth set`, top-level `sync`/`push`.
 
 **Removed entirely:** the `power` group (flattened), the `guest` group
 (`run`→`exec`, `copy-*`→`cp`, and **`guest ps`/`guest kill` dropped** so `ps`
@@ -59,29 +58,30 @@ means list-VMs and `kill` means hard-stop-VM with no collision), and the
 
 ### Key sub-decisions (grilled)
 
-- **`ps` = list running VMs** (docker default), not guest processes. Dropping
+- **`ps` = list running VMs**, not guest processes. Dropping
   `guest ps`/`guest kill` is what frees the words `ps` and `kill` for their
-  docker meanings.
+  VM-level meanings.
 - **`snapshot commit` memory default.** Memory is captured when the VM is
   running, disk-only automatically when off (matches the Workstation GUI;
   reverses today's disk-only default — findings #17/#20). `-m`/`--message` is
-  now the git-style description; the old `-m`=`--memory` short flag is gone.
+  now the snapshot description; the old `-m`=`--memory` short flag is gone.
   `--disk-only` forces a fast no-RAM snapshot on a running VM.
 - **`snapshot reset`, not `revert`/`restore`.** Reverting discards current
-  state and jumps to the saved point — semantically `git reset --hard <ref>`.
-  `git revert` (inverse commit) is a false friend; `git restore` (file-level)
-  is softer than the whole-state hard jump that actually happens. The
-  destructive connotation of `reset` is accurate.
-- **`cp` merges both directions** with docker's `vm:path` syntax; direction is
+  state and jumps to the saved point — a destructive whole-state jump. `reset`
+  was chosen because its destructive connotation is accurate; `revert` and
+  `restore` both suggest softer, more selective operations than what actually
+  happens.
+- **`cp` merges both directions** with a `vm:path` syntax; direction is
   inferred from which side carries the `vm:` prefix; leading `:` auto-selects.
   **Windows drive-letter disambiguation:** a token whose colon is preceded by
   exactly one alpha char and followed by `\` or `/` (`C:\dir`) is a host drive
   path; otherwise the part before the first colon is the VM name.
-- **`stop` stays graceful, `kill` stays hard.** The docker split is preserved;
-  `stop` is *not* changed to default to a hard power-off. `vmrun stop soft` can
-  hang on a guest without Tools, but the remedy is to reach for `kill`, not to
-  overload `stop`'s default (which would make `stop` and `kill` identical).
-- **`exec` is headless by default, with two orthogonal docker-style flags.**
+- **`stop` stays graceful, `kill` stays hard.** The graceful/hard split is
+  preserved; `stop` is *not* changed to default to a hard power-off. `vmrun stop
+  soft` can hang on a guest without Tools, but the remedy is to reach for
+  `kill`, not to overload `stop`'s default (which would make `stop` and `kill`
+  identical).
+- **`exec` is headless by default, with two orthogonal flags.**
   This *keeps* the Session-0 default rather than reversing it (an earlier draft
   proposed interactive-by-default; rejected once two vmcli realities were pinned
   live). vmcli `Guest run` **cannot return the guest program's stdout** to the
@@ -104,36 +104,35 @@ means list-VMs and `kill` means hard-stop-VM with no collision), and the
     launches PATH-resolved, no absolute path needed (`vmctl exec -it notepad`),
     and the `start`-detach leaves no lingering `cmd`. The GUI sweet spot.
 
-  Flags are docker-style booleans with long + short forms (`-i/--interactive`,
-  `-t/--tty`) whose single-letter forms combine (`-it` == `-i -t`, native Click),
-  matching `docker run -it`.
+  Flags are booleans with long + short forms (`-i/--interactive`,
+  `-t/--tty`) whose single-letter forms combine (`-it` == `-i -t`, native Click).
 
   Rejected **interactive-by-default**: it optimizes only the GUI-launch case but
-  makes the docker-exec reflex (`vmctl exec ipconfig`) silently return nothing,
+  makes the common `vmctl exec ipconfig` reflex silently return nothing,
   and conflates two unrelated axes — *which session* (headless vs desktop) and
   *whether to use a shell* (PATH/builtins) — into one flag. Splitting them into
-  `-i` (session) and `-t` (shell) keeps each docker reflex intact.
+  `-i` (session) and `-t` (shell) keeps each reflex intact.
 - **Command short-forms (aliases).** Longer groups/verbs get Click aliases —
-  `ss`/`snapshot`, `net`/`network`, `dev`/`peripheral`, `in`/`inspect`,
+  `ss`/`snapshot`, `net`/`network`, `in`/`inspect`,
   `re`/`restart`, `ex`/`exec`; the already-short lifecycle verbs get none. New
   convention beyond ADR-0005 (which covered only option short flags); aliases are
-  additive and never canonical in help/output. Neither docker nor git aliases
-  subcommands, so this is a deliberate vmctl-only ergonomics addition.
+  additive and never canonical in help/output, a deliberate vmctl-only
+  ergonomics addition.
 
 ## Considered options
 
-- **Fully flat (max docker)** — flatten even guest fs/snapshot verbs to the
+- **Fully flat** — flatten even guest fs/snapshot verbs to the
   root. Rejected: forces unnatural names on guest-interior ops and piles up
   collisions (`ps`, `cp`, `commit`, `rm` all contend at the root).
-- **Keep groups, rename leaves only** — lowest churn but barely docker-feel;
-  the common verbs stay two tokens deep (`power start`).
+- **Keep groups, rename leaves only** — lowest churn but barely improves
+  ergonomics; the common verbs stay two tokens deep (`power start`).
 - **Hybrid: flatten lifecycle + exec/cp, keep the rest grouped (chosen)** —
-  the verbs typed constantly are one token; domains with no docker word keep a
+  the verbs typed constantly are one token; specialized domains keep a
   clear namespace.
 
 ## Consequences
 
-- **Large breaking CLI change** (consistent with ADR-0001/0002/0004). Every
+- **Large breaking CLI change** (consistent with ADR-0001/0002). Every
   lifecycle invocation changes shape; four whole groups disappear; `list`→`ls`
   across groups. README, CONTEXT.md, and the CLI tests need rewriting.
 - **Optional-VM-name / leading-`--` rules (ADR-0001) carry over unchanged** —

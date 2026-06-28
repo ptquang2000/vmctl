@@ -10,7 +10,6 @@ from .modules.guest import GuestModule
 from .modules.inspect import InspectModule
 from .modules.mks import MKSModule
 from .modules.network import NetworkModule
-from .modules.peripheral import PeripheralModule
 from .modules.power import PowerModule
 from .modules.shares import SharesModule
 from .modules.snapshot import SnapshotModule
@@ -29,7 +28,6 @@ class VM:
         self.power = PowerModule(vmx_path, runner)
         self.snapshot = SnapshotModule(vmx_path, runner, self.power)
         self.network = NetworkModule(vmx_path, runner)
-        self.peripheral = PeripheralModule(vmx_path, runner)
         self.guest = GuestModule(vmx_path, runner, credentials)
         self.clipboard = ClipboardModule(
             vmx_path, runner, credentials, guest_os_fn=lambda: self._guest_os

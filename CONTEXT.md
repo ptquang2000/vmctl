@@ -1,6 +1,6 @@
 # vmctl Context
 
-vmctl wraps VMware Workstation's `vmcli.exe` and `vmrun.exe` into a **JSON-native Python API** and a **human-readable CLI** (ADR-0007): the library returns native dicts for programmatic callers; the CLI renders docker/git-style text and never emits JSON. This file records domain terms and conventions not obvious from the code. Deep rationale lives in `docs/adr/`.
+vmctl wraps VMware Workstation's `vmcli.exe` and `vmrun.exe` into a **JSON-native Python API** and a **human-readable CLI** (ADR-0007): the library returns native dicts for programmatic callers; the CLI renders human-readable text and never emits JSON. This file records domain terms and conventions not obvious from the code. Deep rationale lives in `docs/adr/`.
 
 ## Language
 
@@ -47,43 +47,43 @@ Every VM command takes the VM **name** as its first positional, which may be **o
 
 Options carry short flags. **Short flags are command-scoped mnemonics, not a global letter map** — Click resolves them per command; the only rule is within-command uniqueness. Each option takes the clearest *local* mnemonic, preferring Unix convention (`fs mkdir -p`=`--parents`, `fs rmdir -r`=`--recursive`). The same letter varies by command — `-d` is `--description`/`--dir`/`--project-dir`; `-p` is `--password`/`--parents`/`--prefix`. **Per-command `--help` is the source of truth.** Soft convention: where a command takes credentials, `-u`/`-p` = user/password.
 
-## Command surface — docker/git flavor (ADR-0006)
+## Command surface (ADR-0006)
 
-The CLI is being re-laid-out so **VM lifecycle reads like docker** and
-**snapshots read like git**. Structure is **hybrid**: lifecycle + exec/copy
-verbs flatten to the top level, everything else stays grouped.
+The CLI is laid out so **VM lifecycle verbs sit at the top level** and
+**snapshots form a `snapshot` group**. Structure is **hybrid**: lifecycle +
+exec/copy verbs flatten to the top level, everything else stays grouped.
 
-- **Top level (docker):** `ps` (lists *running* VMs; `-a` = all), `start`,
+- **Top level:** `ps` (lists *running* VMs; `-a` = all), `start`,
   `stop` (graceful), `kill` (hard power-off), `restart`, `pause`/`unpause`,
   `suspend`, `inspect` (absorbs old `power state` + `parse-vmx`), `clone`,
   `exec` (was `guest run`; **headless by default** — `-t/--tty` wraps through the
   guest shell (`cmd.exe /c start ""` / `sh -c '… &'`) for PATH/builtins/multi-arg
   and detaches so the shell exits at launch; `-i/--interactive` runs on the
   interactive desktop fire-and-forget for GUI apps (absolute path); `-it` = both
-  (GUI sweet spot, no absolute path); short flags combine like `docker run -it`;
+  (GUI sweet spot, no absolute path); short flags combine (`-it`);
   no stdout capture since vmcli `Guest run` can't return guest output), `cp`
-  (merges `copy-to`/`copy-from`, docker `vm:path` syntax — direction from the
+  (merges `copy-to`/`copy-from`, `vm:path` syntax — direction from the
   `vm:` side, leading `:` auto-selects, a one-alpha prefix + `:\`/`:/` is a host
   drive not a VM).
-- **`snapshot` (git):** `log`, `commit <name> -m <msg>` (**memory-default** when
+- **`snapshot` group:** `log`, `commit <name> -m <msg>` (**memory-default** when
   running / disk-only when off; `--disk-only` forces fast no-RAM; old
   `-m`=memory short flag gone), `reset` (was `revert`), `rm`.
-- **Kept groups** (`list`→`ls`): `network`, `peripheral`, `shares`; unchanged
+- **Kept groups** (`list`→`ls`): `network`, `shares`; unchanged
   `clipboard`, `auth`, top-level `sync`/`push`.
 - **Removed:** the `power` group (flattened), the `guest` group (`guest ps`/
-  `kill` dropped so `ps`/`kill` are free for docker meaning), and `fs`,
+  `kill` dropped so `ps`/`kill` are free for the new top-level meaning), and `fs`,
   `tools`, `vars`, `mks` entirely.
 
 ## CLI output rendering — human text, JSON is library-only (ADR-0007)
 
 The CLI **never emits JSON**; raw JSON is the *library's* return contract for
-programmatic callers. The CLI renders docker/git-style text (extends ADR-0006
+programmatic callers. The CLI renders human-readable text (extends ADR-0006
 from verbs to output). Rendering lives in pure `vmctl/render.py` (`dict -> str`,
 no Click) so it's unit-tested as strings.
 
-- **Collections → aligned tables.** `ps`/`peripheral ls` docker-style;
-  `snapshot log` git-log-ish (`*` current-marker); `network ls` plain table.
-  Booleans → `yes`/`no`; unknown/`null` (USB `connected`) → `-`. Empty → header
+- **Collections → aligned tables.** `ps` as a table;
+  `snapshot log` as a log (`*` current-marker); `network ls` plain table.
+  Booleans → `yes`/`no`; unknown/`null` → `-`. Empty → header
   row only.
 - **Scalar value-reads stay bare** (`network ip`, `clipboard pull`): the value
   alone, no label/`vm:` prefix, so they're **pipeable**. Empty IP → blank line.
@@ -107,7 +107,7 @@ no Click) so it's unit-tested as strings.
 ## snapshot reset lifecycle (ADR-0002, ADR-0006)
 
 > Renamed `snapshot revert` → `snapshot reset` (ADR-0006): reverting discards
-> current state and jumps to the saved point = `git reset --hard`. Behavior unchanged.
+> current state and jumps to the saved point. Behavior unchanged.
 
 `snapshot reset` is a lifecycle macro, not a bare vmcli call: vmcli `Snapshot Revert` **errors while the VM is online** (running/paused) but tolerates off/suspended. The snapshot name is **resolved/validated first**, so a typo never powers off the VM.
 
@@ -146,7 +146,7 @@ Both reads and writes use vmrun when vmcli can't serve them: `power.state()` rea
 
 - **Directory destinations are rejected** — `C:\`, `C:\Users`, bare `C:` fail with `The object is not a file` (a guest-side stat, not a string check). vmctl applies cp/scp semantics for *explicit* directory forms (trailing `\`/`/`, or bare drive root) by appending the source basename; an existing dir given without a trailing separator can't be detected locally and raises an actionable `VMCtlError`.
 - **Direction-sensitive** — for `copy_to` the dir is the guest **dest**; for `copy_from` the guest **source**. `copy_from` to an existing *host* dir reports `File already exists`, not `not a file`.
-- **Large files fail — small-files-by-design.** Pinned live: **≤60 KB OK, ≥64 KB fails** with opaque `Unknown error` and the file doesn't land (gray zone in (60 KB, 64 KB]). Not a permission issue. `guest.copy_to` **refuses up front** any file > `_COPY_TO_MAX_BYTES = 60*1024` with an actionable error; it doesn't call vmcli. If the host file can't be stat'd, the size check is skipped. **For large transfers use an HGFS share** (`shares add`) **or an ISO** (`peripheral mount-iso`).
+- **Large files fail — small-files-by-design.** Pinned live: **≤60 KB OK, ≥64 KB fails** with opaque `Unknown error` and the file doesn't land (gray zone in (60 KB, 64 KB]). Not a permission issue. `guest.copy_to` **refuses up front** any file > `_COPY_TO_MAX_BYTES = 60*1024` with an actionable error; it doesn't call vmcli. If the host file can't be stat'd, the size check is skipped. **For large transfers use an HGFS share** (`shares add`) **or `push`** (SSH/SFTP).
 - **No programmatic copy-paste / drag-and-drop.** The GUI host↔guest file CP/DnD has **no CLI/API/RPC** — it's a GUI-only feature of Workstation + `vmtoolsd -n vmusr` on the CP/DnD backdoor channel, undrivable by vmcli/vmrun. Do not re-investigate. The `clipboard` module handles **text only**, unrelated to file paste.
 
 ## clipboard text (push / pull)
@@ -184,44 +184,3 @@ The seam is **`vm.sync`** (a `SyncModule`), surfaced as **`vmctl sync`** and **`
 | Needs | Tools running | OpenSSH server + reachable guest IP |
 
 A `dest` that works for `push` (a directory) is rejected by `copy-to`; a file too big for `copy-to` is exactly what `push` is for. Help strings cross-reference each other.
-
-## peripheral devices (ADR-0004, unified connect/disconnect)
-
-`peripheral` went from 9 verbs to **4**: `list`, `connect`, `disconnect`, `mount-iso`.
-
-- **Device id** — the *native* identifier exactly as VMware names it: the **vmcli label** for disks/serial (`sata0:1`, `nvme0:0`, `serial0`), the **named-device string** for USB. The id in `list` is the id you type into `connect`/`disconnect`. No synthesized/friendly id. _Avoid_: "device name" alone.
-- **Device type** — one of `disk`, `cdrom`, `serial`, `usb`. Derived, not user-typed: `cdrom` vs `disk` from the backing (`cdrom_image` ⇒ `cdrom`). `type` is what `connect`/`disconnect` dispatch on and what marks a `cdrom` (the only type `mount-iso` targets).
-
-### `list` is the contract backbone
-
-`peripheral.list()` returns a **flat, uniform** inventory, one schema per device:
-
-```
-{"vm": "<name>", "devices": [
-  {"id": "sata0:1", "type": "cdrom",  "connected": true,  "backing": "foo.iso"},
-  {"id": "serial0", "type": "serial", "connected": false, "backing": ...},
-  {"id": "<usb name>", "type": "usb", "connected": true,  "backing": ...}]}
-```
-
-Replaces the old grouped `{"disks","serial"}` (which omitted USB). Disks/serial from `vmcli Disk query` / `Serial Query`; **USB from the `.vmx` named-device config** — there's no vmcli/vmrun verb that enumerates connectable *host* hardware, so "available" means "devices the VM knows about," not a live host-USB probe.
-
-> ⚠️ **Verify live at implementation:** exact `.vmx` key(s) and the precise name string `vmrun connectNamedDevice` accepts for USB, and whether USB `connected` state is readable from `.vmx`.
-
-### connect/disconnect resolve id → type via `list`
-
-`connect(id)`/`disconnect(id)` call `self.list()`, match the entry by exact `id`, read its `type`, dispatch to a private helper. One id namespace; the per-type split is hidden.
-
-- **Zero matches** → actionable error listing valid ids.
-- **Id collides across types** → **hard error** to disambiguate (no baked priority). Near-impossible given distinct namespaces, but the resolver must not silently pick.
-- Resolution + dispatch + errors live in the **library** (`PeripheralModule`), unit-testable without Click. Old public typed methods (`connect_disk`, …) removed in favor of private `_connect_disk`/`_connect_serial`/`_connect_usb`.
-
-### Backend stays split (dispatch by type)
-
-| type | backend | id |
-|---|---|---|
-| disk / serial / cdrom | `vmcli … ConnectionControl <label> connect\|disconnect` | vmcli label |
-| usb | `vmrun connectNamedDevice` / `disconnectNamedDevice <name>` | named-device string |
-
-`vmrun connectNamedDevice` is not USB-specific (connects any named VMX device), so converging all dispatch onto it is tempting — but we **kept the split**: vmcli supplies the `connected` state `list` needs and likely works while off, whereas `connectNamedDevice` typically needs the VM running. Collapsing is a **logged follow-up to verify live**.
-
-`mount-iso <id> <iso>` is separate because it rebinds the device **backing** (sets the ISO path) *then* connects — something plain `connect` can't do. `eject` was dropped (it was exactly `disconnect <cdrom-id>`).

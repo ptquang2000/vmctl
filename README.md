@@ -3,8 +3,8 @@
 A Python API and command-line wrapper around the VMware Workstation CLI tools
 (`vmcli.exe` and `vmrun.exe`). `vmctl` turns the two stock binaries into a single
 clean interface split by audience (ADR-0007): the **library** is JSON-native —
-every method returns a `dict` — while the **CLI** renders human-readable,
-docker/git-style text. VMs are addressed by name (auto-discovered from configured
+every method returns a `dict` — while the **CLI** renders human-readable
+text. VMs are addressed by name (auto-discovered from configured
 scan roots), and quirks of the underlying tools are smoothed over so you don't
 have to remember which operation needs `vmrun` versus `vmcli`.
 
@@ -13,16 +13,16 @@ have to remember which operation needs `vmrun` versus `vmcli`.
 - **Output split by audience (ADR-0007)** — the library returns native `dict`s
   (the structured, programmatic interface); the CLI renders human text and never
   emits JSON. Collections print as aligned tables (`ps`, `snapshot log`,
-  `network ls`, `peripheral ls`), value-reads print the bare value so they pipe
+  `network ls`), value-reads print the bare value so they pipe
   (`vmctl network ip`, `vmctl clipboard pull`), mutations print a terse
   confirmation naming the VM (`started windows-10-x64`), and errors are a single
   `error: <msg>` line on stderr. Want structured data from a script? Import the
   library.
 - **Name-based VM lookup** — reference VMs by name instead of `.vmx` paths; they
   are discovered by scanning configured roots.
-- **docker/git-flavored CLI** — VM lifecycle reads like docker (`ps`, `start`,
-  `stop`, `kill`, `exec`, `cp`) and snapshots read like git (`snapshot log`/
-  `commit`/`reset`/`rm`); see ADR-0006. Plus networking, peripherals, shared
+- **Concise verb-based CLI** — VM lifecycle uses short top-level verbs (`ps`,
+  `start`, `stop`, `kill`, `exec`, `cp`) and snapshots use a `snapshot` group
+  (`log`/`commit`/`reset`/`rm`); see ADR-0006. Plus networking, shared
   folders (HGFS), clipboard, and VMX inspection.
 - **Quirk handling baked in** — power mutations are routed through `vmrun`
   (which doesn't require the `__vmware__` group), HGFS shares are written via
@@ -82,15 +82,15 @@ vmctl auth set myvm --user test --password test
 
 The CLI is grouped by subsystem. A few examples:
 
-The CLI reads like **docker** for VM lifecycle and **git** for snapshots
-(ADR-0006). The VM is the container: lifecycle and exec/copy verbs are top-level.
+The CLI uses short top-level verbs for VM lifecycle and a `snapshot` group for
+snapshots (ADR-0006). Lifecycle and exec/copy verbs are top-level.
 
 ```bash
-# List VMs (docker `ps`): running only, or `-a` for all discovered
+# List VMs: running only, or `-a` for all discovered
 vmctl ps
 vmctl ps -a
 
-# Lifecycle (docker): stop is graceful, kill is a hard power-off
+# Lifecycle: stop is graceful, kill is a hard power-off
 vmctl start myvm
 vmctl stop myvm
 vmctl kill myvm
@@ -98,15 +98,15 @@ vmctl restart myvm
 vmctl suspend myvm                       # also pause / unpause
 vmctl clone myvm dest                    # VMware full/linked clone (-l)
 
-# Snapshots (git)
+# Snapshots
 vmctl snapshot log myvm
 vmctl snapshot commit myvm clean -m "fresh install"   # memory when running,
                                                       # disk-only when off
 vmctl snapshot commit myvm clean --disk-only          # fast no-RAM while running
-vmctl snapshot reset myvm clean          # discard state, jump back (git reset --hard)
+vmctl snapshot reset myvm clean          # discard state, jump back to the snapshot
 vmctl snapshot rm myvm clean -c          # -c deletes children
 
-# exec (docker): headless by default; no stdout capture (vmcli only launches)
+# exec: headless by default; no stdout capture (vmcli only launches)
 vmctl exec myvm ipconfig                 # headless, program + <=1 arg, run directly
 vmctl exec -t myvm "dir C:\\ & echo done"  # -t wraps through the guest shell
                                            # (PATH, builtins, pipes, multi-arg)
@@ -115,7 +115,7 @@ vmctl exec -i myvm "C:\\Windows\\System32\\notepad.exe"  # -i: interactive deskt
                                            #  search PATH)
 vmctl exec -it myvm notepad              # -it: GUI on the desktop, PATH-resolved
 
-# cp (docker vm:path): direction inferred from the vm: side
+# cp (vm:path syntax): direction inferred from the vm: side
 vmctl cp ./local.txt myvm:C:\\local.txt   # host -> guest
 vmctl cp myvm:C:\\out.txt ./out.txt       # guest -> host
 vmctl cp ./local.txt :C:\\local.txt       # leading `:` auto-selects the running VM
@@ -123,9 +123,8 @@ vmctl cp ./local.txt :C:\\local.txt       # leading `:` auto-selects the running
 # Inspect (folds in the old `power state` + `parse-vmx`)
 vmctl inspect myvm
 
-# Networking / peripherals / shares (list -> `ls`)
+# Networking / shares (list -> `ls`)
 vmctl network ls myvm
-vmctl peripheral ls myvm
 vmctl shares add myvm "C:\\host\\dir" --writable --guest-name shared
 vmctl shares ls myvm
 
@@ -144,11 +143,11 @@ vmctl push -- ./build "C:\app"           # auto-select (leading -- before paths)
 
 Top-level verbs: `ps`, `start`, `stop`, `kill`, `restart`, `pause`, `unpause`,
 `suspend`, `inspect`, `clone`, `exec`, `cp`, `sync`, `push`. Groups: `snapshot`
-(`log`/`commit`/`reset`/`rm`), `network`, `peripheral`, `shares` (all use `ls`),
+(`log`/`commit`/`reset`/`rm`), `network`, `shares` (both use `ls`),
 `clipboard`, `auth`.
 
 **Aliases (ADR-0006).** Longer names have short forms: `ss`=`snapshot`,
-`net`=`network`, `dev`=`peripheral`, `in`=`inspect`, `re`=`restart`, `ex`=`exec`.
+`net`=`network`, `in`=`inspect`, `re`=`restart`, `ex`=`exec`.
 
 **Optional VM name (ADR-0001).** The leading VM name may be omitted to
 auto-select the single running VM; use a leading `--` when other positionals
@@ -156,8 +155,7 @@ follow (`vmctl snapshot commit -- clean -m msg`).
 
 **Short option flags (ADR-0005).** Options have short flags (`-m`/`--message`,
 `-H`/`--hard`, …) — per-command mnemonics, so the authority is each command's
-`--help`, not a global letter map. `exec` follows docker: `-i`/`-t` combine as
-`-it`.
+`--help`, not a global letter map. `exec` combines `-i`/`-t` as `-it`.
 
 **Two file-into-guest paths — don't confuse them.** `cp` uses VMware Tools,
 takes a **file** destination, and is capped at ~60 KB; `push` uses SSH/SFTP,
@@ -174,7 +172,6 @@ ctl = VMCtl()
 vm = ctl.get("myvm")
 
 vm.power.start()
-print(vm.tools.query())
 vm.snapshot.take("clean", memory=True)
 
 # Guest ops use credentials from config
@@ -183,8 +180,8 @@ print(vm.guest.ps())
 ```
 
 Each `VM` exposes the same subsystems as the CLI groups: `power`, `snapshot`,
-`network`, `peripheral`, `guest`, `clipboard`, `fs`, `tools`, `shares`, `mks`,
-`vars`, `inspect`, and `sync` (`vm.sync.run()` / `vm.sync.push()`).
+`network`, `guest`, `clipboard`, `shares`, `inspect`, and `sync`
+(`vm.sync.run()` / `vm.sync.push()`).
 
 ## Notes & known constraints
 

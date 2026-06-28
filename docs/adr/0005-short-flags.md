@@ -42,4 +42,4 @@ command takes credentials, `-u`/`-p` are user/password.
 - **`-h` is intentionally not bound** to `--help` (Click's default), leaving it
   free; no option currently claims it.
 - **Reversible CLI ergonomics**, consistent with the project's prior CLI
-  changes (ADR-0001/0004). No library or schema change.
+  changes (ADR-0001). No library or schema change.

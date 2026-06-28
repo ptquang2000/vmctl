@@ -16,7 +16,6 @@ _AUTO = "\x00__vmctl_auto__"
 _ALIASES = {
     "ss": "snapshot",
     "net": "network",
-    "dev": "peripheral",
     "in": "inspect",
     "re": "restart",
     "ex": "exec",
@@ -107,9 +106,9 @@ class AliasedGroup(click.Group):
 def cli():
     """Control VMware Workstation VMs from the terminal.
 
-    The command surface mirrors docker/git: `ps`, `start`, `stop`, `kill`,
-    `restart`, `exec`, `cp`, `inspect`, plus `snapshot` (git-style log/commit/
-    reset/rm) and grouped `network`/`peripheral`/`shares`/`clipboard` commands.
+    The command surface uses short top-level verbs: `ps`, `start`, `stop`,
+    `kill`, `restart`, `exec`, `cp`, `inspect`, plus `snapshot` (log/commit/
+    reset/rm) and grouped `network`/`shares`/`clipboard` commands.
     Output is human-readable text; for structured data import the library
     (`VMCtl(...)`), which returns native dicts.
 
@@ -122,10 +121,10 @@ def cli():
 
 
 # ---------------------------------------------------------------------------
-# ps -- list VMs (docker `ps`)
+# ps -- list VMs
 # ---------------------------------------------------------------------------
 def _ps_rows(data: dict, show_all: bool) -> list:
-    """Reshape ``list_vms()`` output into docker-style ``ps`` rows.
+    """Reshape ``list_vms()`` output into ``ps`` rows.
 
     Running is derived by matching each discovered .vmx against the set of paths
     ``vmrun list`` reports (normalized for case/separators). Without ``-a`` only
@@ -145,7 +144,7 @@ def _ps_rows(data: dict, show_all: bool) -> list:
 @click.option("-a", "--all", "show_all", is_flag=True,
               help="Include stopped/suspended VMs (default: running only).")
 def cmd_ps(show_all):
-    """List running VMs (docker `ps`); `-a` includes stopped ones."""
+    """List running VMs; `-a` includes stopped ones."""
     try:
         click.echo(render.ps(_ps_rows(_vmctl().list_vms(), show_all)))
     except (VMCtlError, ValueError) as e:
@@ -153,7 +152,7 @@ def cmd_ps(show_all):
 
 
 # ---------------------------------------------------------------------------
-# lifecycle (docker: start/stop/kill/restart/pause/unpause/suspend)
+# lifecycle (start/stop/kill/restart/pause/unpause/suspend)
 # ---------------------------------------------------------------------------
 @cli.command("start", cls=VMCommand)
 @click.argument("name", required=False)
@@ -161,7 +160,7 @@ def cmd_ps(show_all):
               help="Boot headless (no Workstation console window). A memory "
                    "snapshot's interactive session is still restored.")
 def cmd_start(name, paused):
-    """Power on the VM (docker `start`); opens the Workstation console by
+    """Power on the VM; opens the Workstation console by
     default. Use `-P` to boot headless."""
     try:
         vm = _resolve(name)
@@ -186,7 +185,7 @@ def cmd_stop(name):
 @cli.command("kill", cls=VMCommand)
 @click.argument("name", required=False)
 def cmd_kill(name):
-    """Hard power-off the VM (docker `kill`); pulls the virtual plug."""
+    """Hard power-off the VM; pulls the virtual plug."""
     try:
         vm = _resolve(name)
         vm.power.stop(hard=True)
@@ -201,7 +200,7 @@ def cmd_kill(name):
               help="Reset the virtual power button instead of asking the guest "
                    "to reboot gracefully.")
 def cmd_restart(name, hard):
-    """Reboot the VM (docker `restart`); graceful by default, `-H` forces a hard
+    """Reboot the VM; graceful by default, `-H` forces a hard
     reset."""
     try:
         vm = _resolve(name)
@@ -214,7 +213,7 @@ def cmd_restart(name, hard):
 @cli.command("pause", cls=VMCommand)
 @click.argument("name", required=False)
 def cmd_pause(name):
-    """Freeze the running VM's CPU (docker `pause`); resume with `unpause`. State
+    """Freeze the running VM's CPU; resume with `unpause`. State
     stays in RAM and the VM keeps reporting as on."""
     try:
         vm = _resolve(name)
@@ -227,7 +226,7 @@ def cmd_pause(name):
 @cli.command("unpause", cls=VMCommand)
 @click.argument("name", required=False)
 def cmd_unpause(name):
-    """Resume a VM frozen with `pause` (docker `unpause`)."""
+    """Resume a VM frozen with `pause`."""
     try:
         vm = _resolve(name)
         vm.power.unpause()
@@ -250,7 +249,7 @@ def cmd_suspend(name):
 
 
 # ---------------------------------------------------------------------------
-# clone (VMware term; no docker analog)
+# clone (VMware term)
 # ---------------------------------------------------------------------------
 @cli.command("clone", cls=VMCommand)
 @click.argument("name", required=False)
@@ -271,7 +270,7 @@ def cmd_clone(name, dest, linked):
 
 
 # ---------------------------------------------------------------------------
-# exec (docker `exec`) -- headless by default; -t shell wrap, -i desktop
+# exec -- headless by default; -t shell wrap, -i desktop
 # ---------------------------------------------------------------------------
 _CMD_EXE = r"C:\Windows\System32\cmd.exe"
 
@@ -318,7 +317,7 @@ def _build_exec(program_args, guest_os: str, tty: bool):
                    "program detaches so the call returns at launch.")
 @click.argument("program_args", nargs=-1)
 def cmd_exec(name, interactive, tty, program_args):
-    """Run a command in the guest (docker `exec`); headless by default.
+    """Run a command in the guest; headless by default.
 
     vmcli `Guest run` only launches -- it never returns the guest program's
     stdout -- so `exec` captures no output. `-t` wraps through the guest shell,
@@ -341,7 +340,7 @@ def cmd_exec(name, interactive, tty, program_args):
 
 
 # ---------------------------------------------------------------------------
-# cp (docker `vm:path`) -- merges the old copy-to/copy-from
+# cp (vm:path syntax) -- merges the old copy-to/copy-from
 # ---------------------------------------------------------------------------
 def _split_vm_path(token: str):
     """Split a ``cp`` token into ``(vm, path)`` or ``(None, host_path)``.
@@ -365,7 +364,7 @@ def _split_vm_path(token: str):
 @click.option("-o", "--overwrite", is_flag=True,
               help="Overwrite the destination file if it already exists.")
 def cmd_cp(src, dst, overwrite):
-    """Copy a file between host and guest using docker `vm:path` syntax.
+    """Copy a file between host and guest using `vm:path` syntax.
 
     Direction is inferred from which side carries the `vm:` prefix:
     `vmctl cp ./f myvm:C:\\dir` (host->guest), `vmctl cp myvm:C:\\f ./` (guest->
@@ -439,7 +438,7 @@ def auth_set(name, user, password):
 # ---------------------------------------------------------------------------
 @cli.group(cls=VMGroup)
 def snapshot():
-    """Manage VM snapshots (git-style: log/commit/reset/rm)."""
+    """Manage VM snapshots (log/commit/reset/rm)."""
     pass
 
 
@@ -494,7 +493,7 @@ def snapshot_reset(name, snap_name):
 @click.option("-c", "--delete-children", is_flag=True,
               help="Also delete all snapshots descended from this one.")
 def snapshot_rm(name, snap_name, delete_children):
-    """Delete a snapshot (docker `rm`)."""
+    """Delete a snapshot."""
     try:
         vm = _resolve(name)
         vm.snapshot.delete(snap_name, delete_children=delete_children)
@@ -586,69 +585,6 @@ def network_set_name(name, label, network_name):
         vm = _resolve(name)
         vm.network.set_name(label, network_name)
         click.echo(render.network_name_set(vm.name, label, network_name))
-    except (VMCtlError, ValueError) as e:
-        _err(str(e))
-
-
-# ---------------------------------------------------------------------------
-# peripheral
-# ---------------------------------------------------------------------------
-@cli.group(cls=VMGroup)
-def peripheral():
-    """Manage virtual devices: disks, CD/DVD drives, serial ports, USB."""
-    pass
-
-
-@peripheral.command("ls")
-@click.argument("name", required=False)
-def peripheral_ls(name):
-    """List the VM's devices as a flat table of {id, type, connected, backing}.
-    Copy an `id` to use with connect/disconnect/mount-iso."""
-    try:
-        vm = _resolve(name)
-        click.echo(render.peripheral_ls(vm.peripheral.list()))
-    except (VMCtlError, ValueError) as e:
-        _err(str(e))
-
-
-@peripheral.command("mount-iso")
-@click.argument("name", required=False)
-@click.argument("label")
-@click.argument("iso_path")
-def peripheral_mount_iso(name, label, iso_path):
-    """Back the CD/DVD drive LABEL with the ISO at ISO_PATH (host-side path)."""
-    try:
-        vm = _resolve(name)
-        vm.peripheral.mount_iso(label, iso_path)
-        click.echo(render.iso_mounted(vm.name, label, iso_path))
-    except (VMCtlError, ValueError) as e:
-        _err(str(e))
-
-
-@peripheral.command("connect")
-@click.argument("name", required=False)
-@click.argument("device_id")
-def peripheral_connect(name, device_id):
-    """Connect the device with id DEVICE_ID (copy it from `peripheral ls`).
-    The device type is resolved from the id; no type needs to be supplied."""
-    try:
-        vm = _resolve(name)
-        vm.peripheral.connect(device_id)
-        click.echo(render.peripheral_connected(vm.name, device_id))
-    except (VMCtlError, ValueError) as e:
-        _err(str(e))
-
-
-@peripheral.command("disconnect")
-@click.argument("name", required=False)
-@click.argument("device_id")
-def peripheral_disconnect(name, device_id):
-    """Disconnect the device with id DEVICE_ID (copy it from `peripheral ls`).
-    The device type is resolved from the id; no type needs to be supplied."""
-    try:
-        vm = _resolve(name)
-        vm.peripheral.disconnect(device_id)
-        click.echo(render.peripheral_disconnected(vm.name, device_id))
     except (VMCtlError, ValueError) as e:
         _err(str(e))
 

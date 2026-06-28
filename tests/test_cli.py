@@ -1,5 +1,5 @@
 """Unit tests for the CLI: the resolution layer (optional VM name, the
-leading-``--`` marker, auto-select), the docker/git-flavored command surface
+leading-``--`` marker, auto-select), the restructured command surface
 (ADR-0006), and the human-text output contract (ADR-0007).
 
 Output is now human-readable text, not JSON: the library is the structured
@@ -194,7 +194,7 @@ def test_non_leading_dashdash_is_conventional(run):
 
 
 # --------------------------------------------------------------------------- #
-# ps (docker `ps`)                                                            #
+# ps                                                                          #
 # --------------------------------------------------------------------------- #
 
 
@@ -290,12 +290,6 @@ def test_network_ls_maps_to_list(run):
     result, ctl = run(["network", "ls", "myvm"])
     assert result.exit_code == 0
     assert _last(ctl, "list")["module"] == "network"
-
-
-def test_peripheral_ls_maps_to_list(run):
-    result, ctl = run(["peripheral", "ls", "myvm"])
-    assert result.exit_code == 0
-    assert _last(ctl, "list")["module"] == "peripheral"
 
 
 def test_shares_ls_maps_to_list(run):
@@ -518,7 +512,7 @@ def test_build_exec_tty_non_windows():
 
 
 # --------------------------------------------------------------------------- #
-# cp (docker vm:path syntax)                                                  #
+# cp (vm:path syntax)                                                         #
 # --------------------------------------------------------------------------- #
 
 
@@ -625,7 +619,6 @@ def test_split_vm_path(token, expected):
 @pytest.mark.parametrize("alias,canonical", [
     ("ss", "snapshot"),
     ("net", "network"),
-    ("dev", "peripheral"),
     ("in", "inspect"),
     ("re", "restart"),
     ("ex", "exec"),

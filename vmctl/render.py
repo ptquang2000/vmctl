@@ -1,7 +1,7 @@
 """Pure ``dict -> str`` rendering for the CLI (ADR-0007).
 
 The library returns native dicts (the JSON-native programmatic contract); the CLI
-renders human-readable, docker/git-flavored text. Every function here is a pure
+renders human-readable text. Every function here is a pure
 transform with **zero Click imports**, so output is unit-tested as plain strings
 (the testable-without-Click pattern used throughout the codebase). ``cli.py``
 calls these then ``click.echo``s the result.
@@ -9,7 +9,7 @@ calls these then ``click.echo``s the result.
 Three shapes:
 
 - **Collections** -> aligned column tables (``ps``, ``snapshot log``,
-  ``network ls``, ``peripheral ls``, ``shares ls``, and the ``inspect`` sub-tables).
+  ``network ls``, ``shares ls``, and the ``inspect`` sub-tables).
   Booleans render ``yes``/``no``; an unknown/``None`` value renders ``-``.
   An empty collection renders the header row only.
 - **Scalar value-reads** (``network ip``, ``clipboard pull``) -> the bare value,
@@ -17,14 +17,14 @@ Three shapes:
 - **Mutations** -> a terse confirmation line synthesized from a verb + the
   resolved VM name (library mutation returns are contentless ``{"success": True}``).
 
-Two fields below are guessed from the .vmx and the docker/git conventions rather
+Two fields below are guessed from the .vmx and the rendering conventions rather
 than pinned against live vmcli JSON (flagged "verify live" in ADR-0007): the
 ``snapshot log`` current-marker (driven by ``currentUID``) and the
 ``Ethernet query`` column names. Both read defensively with ``.get`` and tolerate
 alternate key spellings; columns adjust if the live fields differ.
 """
 
-# Gap between table columns (docker-style).
+# Gap between table columns.
 _GAP = "   "
 
 
@@ -67,7 +67,7 @@ def _indent(text: str, spaces: int = 2) -> str:
 
 
 def ps(rows) -> str:
-    """``ps`` -> docker-style ``NAME STATUS`` table.
+    """``ps`` -> ``NAME STATUS`` table.
 
     ``rows`` is the reshaped ``[{"name", "status"}, ...]`` from the CLI.
     """
@@ -76,7 +76,7 @@ def ps(rows) -> str:
 
 
 def snapshot_log(data: dict) -> str:
-    """``snapshot log`` -> git-log-ish table: a ``*`` current-marker, the
+    """``snapshot log`` -> log table: a ``*`` current-marker, the
     snapshot name, and its description (when the query carries one)."""
     current = data.get("currentUID")
     rows = []
@@ -124,19 +124,6 @@ def network_ip(data: dict) -> str:
     return data.get("ip", "")
 
 
-def peripheral_ls(data: dict) -> str:
-    """``peripheral ls`` -> docker-style ``ID TYPE CONNECTED BACKING`` table."""
-    rows = []
-    for dev in data.get("devices", []):
-        rows.append([
-            dev.get("id", ""),
-            dev.get("type", ""),
-            _yn(dev.get("connected")),
-            dev.get("backing") or "-",
-        ])
-    return _table(["ID", "TYPE", "CONNECTED", "BACKING"], rows)
-
-
 def shares_ls(data: dict) -> str:
     """``shares ls`` -> ``LABEL HOST PATH GUEST NAME WRITABLE ENABLED`` table."""
     rows = []
@@ -172,8 +159,8 @@ def _kv(label: str, value, width: int) -> str:
 
 
 def _disk_table(disk: dict) -> str:
-    """Reshape a raw ``Disk query`` dict into the peripheral-style id/type/
-    connected/backing table (cdrom vs disk derived from the backing)."""
+    """Reshape a raw ``Disk query`` dict into an id/type/connected/backing
+    table (cdrom vs disk derived from the backing)."""
     rows = []
     for group in ("cdroms", "disks", "scsis"):
         for e in disk.get(group, []):
@@ -303,18 +290,6 @@ def network_type_set(vm: str, label: str, type_: str) -> str:
 
 def network_name_set(vm: str, label: str, network_name: str) -> str:
     return f"set {label} network to {network_name} on {vm}"
-
-
-def peripheral_connected(vm: str, device_id: str) -> str:
-    return f"connected {device_id} on {vm}"
-
-
-def peripheral_disconnected(vm: str, device_id: str) -> str:
-    return f"disconnected {device_id} on {vm}"
-
-
-def iso_mounted(vm: str, label: str, iso: str) -> str:
-    return f"mounted {iso} on {label} of {vm}"
 
 
 def shares_added(vm: str, label: str, host_path: str) -> str:

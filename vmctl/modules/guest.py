@@ -15,8 +15,7 @@ _COPY_TO_MAX_BYTES = 60 * 1024
 _LARGE_FILE_HINT = (
     "is too large for 'guest copy-to' (limit {limit} bytes; vmcli Guest copyTo "
     "fails silently on larger files). For sizeable payloads use an HGFS shared "
-    "folder ('vmctl shares add <host_dir>') or attach the file as an ISO "
-    "('vmctl peripheral mount-iso')."
+    "folder ('vmctl shares add <host_dir>') or push over SSH ('vmctl push')."
 )
 
 

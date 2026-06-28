@@ -105,31 +105,6 @@ def test_network_ip_empty_is_blank():
 
 
 # --------------------------------------------------------------------------- #
-# peripheral ls                                                               #
-# --------------------------------------------------------------------------- #
-
-
-def test_peripheral_ls_table_with_tristate_connected():
-    data = {"devices": [
-        {"id": "sata0:1", "type": "cdrom", "connected": True,
-         "backing": r"C:\iso\foo.iso"},
-        {"id": "nvme0:0", "type": "disk", "connected": False, "backing": None},
-        {"id": "usb_xhci:4", "type": "usb", "connected": None, "backing": "hid"},
-    ]}
-    out = render.peripheral_ls(data)
-    assert out == (
-        "ID           TYPE    CONNECTED   BACKING\n"
-        r"sata0:1      cdrom   yes         C:\iso\foo.iso" + "\n"
-        "nvme0:0      disk    no          -\n"
-        "usb_xhci:4   usb     -           hid"
-    )
-
-
-def test_peripheral_ls_empty_header_only():
-    assert render.peripheral_ls({"devices": []}) == "ID   TYPE   CONNECTED   BACKING"
-
-
-# --------------------------------------------------------------------------- #
 # shares ls                                                                   #
 # --------------------------------------------------------------------------- #
 
@@ -274,12 +249,6 @@ def test_network_mutations():
     assert render.network_disconnected("box", "ethernet0") == "disconnected ethernet0 on box"
     assert render.network_type_set("box", "ethernet0", "nat") == "set ethernet0 type to nat on box"
     assert render.network_name_set("box", "ethernet0", "VMnet8") == "set ethernet0 network to VMnet8 on box"
-
-
-def test_peripheral_mutations():
-    assert render.peripheral_connected("box", "usb_xhci:4") == "connected usb_xhci:4 on box"
-    assert render.peripheral_disconnected("box", "usb_xhci:4") == "disconnected usb_xhci:4 on box"
-    assert render.iso_mounted("box", "sata0:1", r"C:\foo.iso") == r"mounted C:\foo.iso on sata0:1 of box"
 
 
 def test_shares_mutations():

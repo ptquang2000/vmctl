@@ -15,23 +15,23 @@ Raw JSON is **hard-removed** from the CLI — not demoted to a `--json` flag. A
 caller who wants structured data imports the library (`VMCtl(...)`), which is
 the integration path already used by the test suite.
 
-This extends ADR-0006 from the command *surface* (docker/git verbs) to the
-command *output* (docker/git rendering): the verbs already read like docker/git,
-now the output does too.
+This extends ADR-0006 from the command *surface* (the restructured verbs) to the
+command *output* (per-command rendering): the verbs were already restructured,
+now the output is tuned to match.
 
-### Rendering rules (per-command tuning, docker/git conventions)
+### Rendering rules (per-command tuning)
 
-- **Collections** → aligned column tables. `ps` and `peripheral ls` docker-style
-  (`NAME STATUS`; `ID TYPE CONNECTED BACKING`); `snapshot log` git-log-ish
+- **Collections** → aligned column tables. `ps`
+  (`NAME STATUS`); `snapshot log` as a log
   (current-marker `*`, name, description); `network ls` plain table
   (`LABEL TYPE NETWORK CONNECTED`). Booleans render `yes`/`no`; an unknown/`null`
-  (USB `connected`) renders `-`. Empty collection → header row only, nothing to
+  value renders `-`. Empty collection → header row only, nothing to
   stderr.
 - **Scalar value-reads** (`network ip`, `clipboard pull`) → the **bare value,
   nothing else** — no label, no `vm:` prefix — so they stay pipeable
   (`vmctl network ip | …`). An empty IP prints a blank line (correct for scripts).
 - **Mutations** (`start`/`stop`/`kill`/`restart`/`pause`/`unpause`/`suspend`/
-  `clone`/`snapshot commit`/`reset`/`rm`, network/peripheral writes) → a terse
+  `clone`/`snapshot commit`/`reset`/`rm`, network writes) → a terse
   **verb + canonical VM name** confirmation line (`started windows-10-x64`).
   Library mutation returns are contentless (`{"success": True}`), so the line is
   **synthesized in the CLI** from the verb + resolved name, not rendered from the
@@ -66,7 +66,7 @@ and all `json.dumps` calls are deleted from `cli.py`.
   insurance, and "one CLI, one output format" is simpler. Can be added later
   non-breakingly if a shell-only consumer ever needs it.
 - **Generic dict-introspecting renderer** (lists→table, scalars→`key: value`) —
-  uniform but generic-looking; ignores the docker/git resemblance ADR-0006
+  uniform but generic-looking; ignores the per-command shaping ADR-0006
   committed to. Rejected for per-command tuning.
 - **Keep `inspect` structured** (carve-out) — rejected; reopens the hard-remove
   decision. The library already serves the full dump.
