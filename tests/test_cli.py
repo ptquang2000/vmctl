@@ -15,6 +15,8 @@ call is appended to the controller's ``calls`` log so argument binding and the
 resolved VM name can be asserted without parsing output.
 """
 
+import base64
+
 import click
 import pytest
 from click.testing import CliRunner
@@ -22,7 +24,6 @@ from click.testing import CliRunner
 import vmctl.cli as cli_mod
 from vmctl import render
 from vmctl.cli import cli, _build_exec, _split_vm_path, _ps_rows
-from vmctl.exceptions import VMCtlError
 
 
 class FakeModule:
@@ -428,21 +429,51 @@ def test_exec_bare_one_arg_ok(exec_run):
     assert rec.calls[0]["args"] == ["/all"]
 
 
-def test_exec_bare_multi_arg_errors_and_never_calls_vmcli(exec_run):
+def test_exec_bare_multi_arg_succeeds_as_single_token(exec_run):
+    # Mode B: multiple args reconstruct into one re-quoted programArgs token
+    # (the old "multiple arguments need a shell" error is gone).
     result, rec = exec_run(["exec", "myvm", "echo", "a", "b"])
-    assert result.exit_code == 1
-    assert "use: vmctl exec -t" in result.output
-    assert rec.calls == []
+    assert result.exit_code == 0
+    assert rec.calls == [{"program": "echo", "args": ["a b"],
+                          "no_wait": False, "interactive": False}]
 
 
-def test_exec_tty_windows_wraps_in_cmd(exec_run):
+_PS_EXE = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+
+
+def _decode_ps_token(arg):
+    """Decode a ``-EncodedCommand <b64>`` token back to its command string.
+
+    vmcli's Guest run takes a single programArgs token, so the flag and the
+    base64 payload are one space-joined token (the base64 has no spaces).
+    """
+    flag, b64 = arg.split(" ", 1)
+    assert flag == "-EncodedCommand"
+    return base64.b64decode(b64).decode("utf-16-le")
+
+
+def _decoded_ps(call):
+    """Decode a mode-A PowerShell -EncodedCommand call back to its command."""
+    assert call["program"] == _PS_EXE
+    assert len(call["args"]) == 1
+    return _decode_ps_token(call["args"][0])
+
+
+def test_exec_tty_windows_wraps_in_powershell(exec_run):
     result, rec = exec_run(["exec", "-t", "myvm", "notepad", "foo.txt"])
     assert result.exit_code == 0
-    assert rec.calls == [{
-        "program": r"C:\Windows\System32\cmd.exe",
-        "args": ['/c notepad foo.txt'],
-        "no_wait": True, "interactive": False,
-    }]
+    assert len(rec.calls) == 1
+    assert rec.calls[0]["no_wait"] is True
+    assert rec.calls[0]["interactive"] is False
+    assert _decoded_ps(rec.calls[0]) == "notepad foo.txt"
+
+
+def test_exec_tty_windows_pipeline_roundtrips(exec_run):
+    pipeline = ('get-content C:\\log.txt | select-string -simplematch '
+                '"server config: <" | select-object -last 1 | set-clipboard')
+    result, rec = exec_run(["exec", "-t", "myvm", pipeline])
+    assert result.exit_code == 0
+    assert _decoded_ps(rec.calls[0]) == pipeline
 
 
 def test_exec_tty_linux_wraps_in_sh(exec_run):
@@ -468,11 +499,10 @@ def test_exec_interactive_adds_interactive_and_nowait(exec_run):
 def test_exec_it_combines_shell_and_desktop(exec_run):
     result, rec = exec_run(["exec", "-it", "myvm", "notepad"])
     assert result.exit_code == 0
-    assert rec.calls == [{
-        "program": r"C:\Windows\System32\cmd.exe",
-        "args": ['/c notepad'],
-        "no_wait": True, "interactive": True,
-    }]
+    assert len(rec.calls) == 1
+    assert rec.calls[0]["no_wait"] is True
+    assert rec.calls[0]["interactive"] is True
+    assert _decoded_ps(rec.calls[0]) == "notepad"
 
 
 def test_exec_it_parses_same_as_i_t(exec_run):
@@ -496,14 +526,45 @@ def test_build_exec_bare():
     assert _build_exec(["ping", "host"], "", tty=False) == ("ping", ["host"])
 
 
-def test_build_exec_bare_multi_arg_raises():
-    with pytest.raises(VMCtlError, match="exec -t"):
-        _build_exec(["echo", "a", "b"], "", tty=False)
+def test_build_exec_bare_multi_arg_collapses_to_one_token():
+    # Mode B: more than one arg now succeeds, collapsed into a single token.
+    assert _build_exec(["echo", "a", "b"], "", tty=False) == ("echo", ["a b"])
+    assert _build_exec(["ipconfig", "/all", "/more"], "", tty=False) == (
+        "ipconfig", ["/all /more"])
+
+
+def test_build_exec_bare_requotes_arg_with_spaces():
+    # A token containing whitespace stays grouped by re-quoting.
+    assert _build_exec(
+        ["app.exe", r"C:\Program Files\x", "/q"], "", tty=False
+    ) == ("app.exe", [r'"C:\Program Files\x" /q'])
+
+
+def test_build_exec_bare_explicit_powershell_forwards():
+    # The explicit-program escape hatch (mode B): powershell.exe written in full
+    # forwards as program + single token, no shell wrap.
+    # The pipeline token carries whitespace, so mode-B re-quoting wraps it,
+    # keeping it one programArgs argument for the guest powershell.exe to reparse.
+    assert _build_exec(
+        ["powershell.exe", "-command", "get-content x | select-string y"],
+        "windows9-64", tty=False,
+    ) == ("powershell.exe", ['-command "get-content x | select-string y"'])
 
 
 def test_build_exec_tty_windows():
-    assert _build_exec(["notepad", "x"], "windows9-64", tty=True) == (
-        r"C:\Windows\System32\cmd.exe", ['/c notepad x'])
+    program, args = _build_exec(["notepad", "x"], "windows9-64", tty=True)
+    assert program == _PS_EXE
+    # vmcli accepts a single programArgs token, so flag + payload are one token.
+    assert len(args) == 1
+    assert _decode_ps_token(args[0]) == "notepad x"
+
+
+def test_build_exec_tty_windows_preserves_inner_quotes_and_pipes():
+    pipeline = 'get-content x | select-string -simplematch "a < b" | set-clipboard'
+    program, args = _build_exec([pipeline], "windows9-64", tty=True)
+    assert program == _PS_EXE
+    assert len(args) == 1
+    assert _decode_ps_token(args[0]) == pipeline
 
 
 def test_build_exec_tty_non_windows():

@@ -311,6 +311,50 @@ def test_guest_run_writes_artifact(guest_vm):
     assert marker in content
 
 
+def test_exec_tty_pipeline_runs_in_guest_powershell(guest_vm):
+    """Prove a ``-t`` pipeline executes inside the guest PowerShell, not on the
+    host shell, through the full host -> CLI -> vmcli -> PowerShell relay.
+
+    The pipeline carries the two features the PRD calls out as fragile across the
+    relay: a PowerShell ``|`` pipe (multiple cmdlet stages) and an inner
+    double-quoted match pattern containing a ``<``. Running it must produce a
+    guest file whose content is the matched line -- only an in-guest PowerShell
+    pipe yields that. ``-t`` detaches (``--noWait``), so poll the artifact back.
+    The whole pipeline is one host argument so the host shell passes it through
+    verbatim; ``-t`` supplies the ``-EncodedCommand`` wrapper.
+    """
+    marker = "server config: <live>"
+    guest_path = r"C:\Windows\Temp\vmctl_pipe_artifact.txt"
+    pipeline = (f'"{marker}" | Select-String -SimpleMatch "config: <" '
+                f'| Set-Content -Encoding ascii {guest_path}')
+    proc = subprocess.run(
+        [sys.executable, "-c", "import vmctl.cli as c; c.cli()",
+         "exec", "-t", VM_NAME, pipeline],
+        capture_output=True,
+    )
+    assert proc.returncode == 0, proc.stderr.decode("utf-8", "replace")
+    assert proc.stdout.decode("utf-8").strip() == f"launched on {VM_NAME}"
+
+    with tempfile.NamedTemporaryFile(suffix=".txt", delete=False) as f:
+        host_out = f.name
+    try:
+        deadline = time.monotonic() + 30
+        content = ""
+        while time.monotonic() < deadline:
+            try:
+                guest_vm.guest.copy_from(guest_path, host_out, overwrite=True)
+                with open(host_out, encoding="utf-8", errors="replace") as fh:
+                    content = fh.read()
+            except VMCtlError:
+                content = ""  # artifact not written yet
+            if content.strip():
+                break
+            time.sleep(2)
+    finally:
+        os.unlink(host_out)
+    assert marker in content
+
+
 def test_guest_copy_roundtrip(guest_vm):
     guest_vm.fs.mkdir(TEST_DIR)
     payload = "round-trip payload"

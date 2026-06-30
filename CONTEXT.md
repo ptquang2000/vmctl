@@ -57,8 +57,9 @@ exec/copy verbs flatten to the top level, everything else stays grouped.
   `stop` (graceful), `kill` (hard power-off), `restart`, `pause`/`unpause`,
   `suspend`, `inspect` (absorbs old `power state` + `parse-vmx`), `clone`,
   `exec` (was `guest run`; **headless by default** — `-t/--tty` wraps through the
-  guest shell (`cmd.exe /c start ""` / `sh -c '… &'`) for PATH/builtins/multi-arg
-  and detaches so the shell exits at launch; `-i/--interactive` runs on the
+  guest shell (PowerShell via `-EncodedCommand` on Windows / `/bin/sh -c` on
+  Linux) for PATH/builtins/pipes and detaches at launch; without `-t` you name
+  the program + args directly (mode B); `-i/--interactive` runs on the
   interactive desktop fire-and-forget for GUI apps (absolute path); `-it` = both
   (GUI sweet spot, no absolute path); short flags combine (`-it`);
   no stdout capture since vmcli `Guest run` can't return guest output), `cp`

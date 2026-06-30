@@ -107,9 +107,12 @@ vmctl snapshot reset myvm clean          # discard state, jump back to the snaps
 vmctl snapshot rm myvm clean -c          # -c deletes children
 
 # exec: headless by default; no stdout capture (vmcli only launches)
-vmctl exec myvm ipconfig                 # headless, program + <=1 arg, run directly
-vmctl exec -t myvm "dir C:\\ & echo done"  # -t wraps through the guest shell
-                                           # (PATH, builtins, pipes, multi-arg)
+vmctl exec myvm ipconfig /all            # headless: name the program + its args
+vmctl exec -t myvm 'gci | sort Length | select -last 1'  # -t runs through the
+                                           # guest shell: PowerShell on Windows
+                                           # (native pipes/cmdlets), sh on Linux
+vmctl exec myvm cmd.exe '/c "dir C:\\ & echo done"'  # mode B escape hatch for
+                                           # cmd idioms: name cmd.exe explicitly
 vmctl exec -i myvm "C:\\Windows\\System32\\notepad.exe"  # -i: interactive desktop
                                            # (absolute path; --interactive won't
                                            #  search PATH)
@@ -197,10 +200,15 @@ Each `VM` exposes the same subsystems as the CLI groups: `power`, `snapshot`,
   `sharedFolder0`, `sharedFolder1`, … and assigned automatically on `add`.
 - **`exec` captures no output and launches only.** `vmcli Guest run` cannot
   return the guest program's stdout and accepts the program plus at most one
-  argument token, so bare `exec` runs the program directly (absolute path
-  safest); `-t` wraps the whole command line through the guest shell
-  (`cmd.exe /c start "" …` / `sh -c '… &'`) to get PATH, builtins, pipes, and
-  multiple args, detaching the program so the call returns at launch.
+  argument token. Two modes, selected by `-t`: without `-t` (mode B) you name an
+  explicit program and its arguments — vmctl re-quotes any token with spaces and
+  collapses them into the single token vmcli allows, forwarding them faithfully
+  (`vmctl exec myvm ipconfig /all`, or `cmd.exe /c "…"` written out for cmd
+  idioms). With `-t` (mode A) vmctl wraps the whole command line in the guest
+  shell — **PowerShell** on Windows (passed via `-EncodedCommand` so pipes,
+  inner quotes, and metacharacters survive the relay), `/bin/sh -c` on Linux —
+  so PATH, builtins, and pipes work. `-t`/`-i` detach so the call returns at
+  launch.
 - **GUI programs need `exec -i` (or `-it`).** Without `-i` the program runs in
   the non-interactive Session 0, so any window it opens is invisible (the CLI
   still prints `launched on <vm>` because the process launched). `-i` places it

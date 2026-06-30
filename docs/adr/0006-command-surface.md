@@ -86,23 +86,28 @@ means list-VMs and `kill` means hard-stop-VM with no collision), and the
   proposed interactive-by-default; rejected once two vmcli realities were pinned
   live). vmcli `Guest run` **cannot return the guest program's stdout** to the
   host (it only launches), and accepts the program **plus exactly one argument
-  token**. So `exec` does no output capture, and the shell wrap is what unlocks
-  multi-arg commands and bare-name/builtin resolution.
-  - **bare `exec`** → headless Session 0, program run directly via vmcli (so
-    absolute path is safest; bare program + ≤1 arg only — >1 token errors with a
-    pointer to `-t`).
-  - **`-t/--tty`** → wrap the whole command line as a single
-    `cmd.exe /c start "" <cmd>` token (`/bin/sh -c '<cmd> &'` on Linux, by sniffed
-    `guestOS`); the shell resolves PATH, builtins, pipes, and multiple args, and
-    **`start`/`&` detaches the program into its own process so the shell exits
-    immediately** — the call waits only for the launch, not the program's
-    lifetime, so long-running/GUI programs don't hang the CLI. Headless.
+  token**. So `exec` does no output capture, and `-t` is the mode selector for
+  whether a guest shell interprets the command line.
+  - **bare `exec` / no `-t` (mode B)** → headless Session 0, program run directly
+    via vmcli. You name an explicit program and its arguments; vmcli takes one
+    `programArgs` token, so the remaining tokens are collapsed into a single token
+    (any token with whitespace re-quoted) and forwarded as a raw tail the guest
+    program re-parses. Multi-arg programs like `ipconfig /all` work with no shell;
+    cmd idioms come back via `cmd.exe /c "…"` written out explicitly.
+  - **`-t/--tty` (mode A)** → wrap the whole command line in the guest shell:
+    **PowerShell** on Windows, passed as `powershell.exe -EncodedCommand <b64>`
+    (base64 of the UTF-16LE command) so no pipe, inner quote, or metacharacter has
+    to survive the host→vmcli→PowerShell relay; `/bin/sh -c <cmd>` on Linux (by
+    sniffed `guestOS`). The shell resolves PATH, builtins, and pipes. Detachment
+    comes from vmcli `--noWait` (not a shell launcher), so the call returns at
+    launch. Headless. (Windows `-t` is PowerShell-only — cmd `&`/`&&`/`%VAR%`
+    idioms move to mode B's `cmd.exe /c`.)
   - **`-i/--interactive`** → vmcli `--interactive`, run on the interactive
     desktop (GUI window appears), fire-and-forget. `--interactive` does not search
     PATH, so `-i` alone **requires an absolute program path**.
-  - **`-it`** → `cmd.exe /c start "" <cmd>` on the interactive desktop: a GUI app
-    launches PATH-resolved, no absolute path needed (`vmctl exec -it notepad`),
-    and the `start`-detach leaves no lingering `cmd`. The GUI sweet spot.
+  - **`-it`** → the mode-A PowerShell wrap on the interactive desktop: a GUI app
+    launches PATH-resolved, no absolute path needed (`vmctl exec -it notepad`).
+    The GUI sweet spot, and where session-bound effects (clipboard) land.
 
   Flags are booleans with long + short forms (`-i/--interactive`,
   `-t/--tty`) whose single-letter forms combine (`-it` == `-i -t`, native Click).

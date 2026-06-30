@@ -1,3 +1,4 @@
+import base64
 import sys
 
 import click
@@ -272,35 +273,58 @@ def cmd_clone(name, dest, linked):
 # ---------------------------------------------------------------------------
 # exec -- headless by default; -t shell wrap, -i desktop
 # ---------------------------------------------------------------------------
-_CMD_EXE = r"C:\Windows\System32\cmd.exe"
+_POWERSHELL = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+
+
+def _ps_encoded_command(cmd: str) -> str:
+    """Encode ``cmd`` for PowerShell's ``-EncodedCommand`` (base64 of UTF-16LE).
+
+    This is PowerShell's documented contract for passing a command verbatim: no
+    quote or shell metacharacter (``|``, ``<``, ``&``, inner ``"``) has to
+    survive escaping across the host -> vmcli -> PowerShell relay.
+    """
+    return base64.b64encode(cmd.encode("utf-16-le")).decode("ascii")
 
 
 def _build_exec(program_args, guest_os: str, tty: bool):
     """Translate `exec` tokens + the ``-t`` flag into (program, prog_args).
 
-    With ``-t`` the whole command line is wrapped in the guest shell as a single
-    token -- ``cmd.exe /c <cmd>`` on Windows, ``/bin/sh -c <cmd>`` elsewhere --
-    so PATH, builtins, pipes, and multiple arguments all work. Detachment is
-    handled by vmcli's ``--noWait`` (see ``cmd_exec``), NOT by a guest-shell
-    launcher: an earlier ``start "" <cmd>`` wrap spawned a *nested* console,
-    which under vmcli's ``--interactive`` session exhausts the guest's desktop
-    heap and fails with "Not enough memory resources are available to process
-    this command." Without ``-t`` the program runs directly via vmcli, which
-    accepts the program plus at most one argument token; more than one raises
-    (pointing at ``-t``).
+    ``-t`` is the mode selector, not a heuristic on the first token:
+
+    Mode A -- shell wrap (``-t``): the whole command line is handed to the guest
+    shell, so PATH, builtins, pipes, and multiple arguments all work and the pipe
+    is the *guest* shell's pipe. On Windows that shell is PowerShell (an absolute
+    path -- ``--interactive`` does not PATH-resolve), invoked as
+    ``powershell.exe -EncodedCommand <b64>`` (base64 of the UTF-16LE command) so
+    no metacharacter or quote needs to survive the host/vmcli/PowerShell relay.
+    ``-EncodedCommand <b64>`` is one *single* ``programArgs`` token because
+    vmcli's ``Guest run`` accepts only one (a second token errors with
+    "Invalid/unrecognized argument"); the base64 carries no spaces, so
+    powershell.exe re-splits it back into flag + payload. Elsewhere the shell is
+    ``/bin/sh -c <cmd>``. The command string is the space-join of
+    the tokens (the reliable form is one single-quoted host argument carrying the
+    whole pipeline). Detachment is handled by vmcli's ``--noWait`` (see
+    ``cmd_exec``), NOT by a guest-shell launcher.
+
+    Mode B -- explicit program (no ``-t``): ``program = tokens[0]`` and the
+    remaining tokens are reconstructed into vmcli's single allowed ``programArgs``
+    token by re-quoting any token that contains whitespace and joining with
+    spaces. vmcli's ``Guest run`` passes that one token as a raw command-line tail
+    the guest program re-parses, so multiple tokens must collapse into one.
+    Inner-quote escaping here is the user's responsibility (the explicit escape
+    hatch); complex-quoting pipelines belong in mode A.
     """
     if tty:
         cmd = " ".join(program_args)
         if "windows" in (guest_os or "").lower():
-            return _CMD_EXE, [f"/c {cmd}"]
+            return _POWERSHELL, [f"-EncodedCommand {_ps_encoded_command(cmd)}"]
         return "/bin/sh", ["-c", cmd]
-    if len(program_args) > 2:
-        raise VMCtlError(
-            "multiple arguments need a shell; use: "
-            f"vmctl exec -t <vm> {' '.join(program_args)}"
-        )
-    program, *args = program_args
-    return program, args
+    program, *rest = program_args
+    if not rest:
+        return program, []
+    arg = " ".join(f'"{t}"' if (t and any(c.isspace() for c in t)) else t
+                   for t in rest)
+    return program, [arg]
 
 
 @cli.command("exec", cls=VMCommand,
@@ -312,9 +336,10 @@ def _build_exec(program_args, guest_os: str, tty: bool):
                    "the program must be an absolute path -- combine with -t to "
                    "PATH-resolve via the shell.")
 @click.option("-t", "--tty", is_flag=True,
-              help="Run the command line through the guest shell (cmd.exe / sh) "
-                   "so PATH, builtins, pipes, and multiple arguments work; the "
-                   "program detaches so the call returns at launch.")
+              help="Run the command line through the guest shell (PowerShell on "
+                   "Windows, /bin/sh on Linux) so PATH, builtins, pipes, and "
+                   "multiple arguments work; the program detaches so the call "
+                   "returns at launch.")
 @click.argument("program_args", nargs=-1)
 def cmd_exec(name, interactive, tty, program_args):
     """Run a command in the guest; headless by default.
