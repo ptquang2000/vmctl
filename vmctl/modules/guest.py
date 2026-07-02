@@ -1,8 +1,21 @@
+import base64
 import os
 import re
+import tempfile
 from typing import Optional
 
 from ..exceptions import VMCtlError
+
+# The guest shell for the Windows capture wrap. --interactive does not search the
+# guest PATH, so PowerShell must be named by absolute path.
+_POWERSHELL = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+
+
+def _decode_captured(raw: bytes, is_windows: bool) -> str:
+    # Windows PowerShell 5.1 `Out-File -Encoding utf8` prepends a UTF-8 BOM;
+    # utf-8-sig strips a leading BOM if present and is a no-op otherwise, so it
+    # decodes both the Windows (BOM) and Linux (clean) captures correctly.
+    return raw.decode("utf-8-sig", errors="replace")
 
 
 def _is_abs(path: str) -> bool:
@@ -85,6 +98,68 @@ class GuestModule:
                     f"'C:\\Windows\\System32\\cmd.exe')"
                 ) from e
             raise
+
+    def run_captured(
+        self, command_line: str, guest_os: str, interactive: bool = False
+    ) -> dict:
+        """Run ``command_line`` in the guest shell to completion, capture its
+        merged output, and return ``{"output": <str>, "exit_code": <int>}``.
+
+        Unlike ``run`` (vmcli ``Guest run --noWait``, fire-and-forget, no output),
+        this blocks until the guest command exits (ADR-0009): ``vmcli Guest run``
+        never blocks, so capture goes through ``vmrun runProgramInGuest``, which
+        waits and propagates the guest exit code. The flow per run: mint a guest
+        temp file, run the command wrapped to redirect *all* streams into it,
+        copy the file back, decode, and clean up both temp files best-effort.
+
+        ``interactive=True`` (``-it``) runs on the guest's interactive desktop by
+        adding ``-interactive`` to the vmrun call. A non-zero guest exit is
+        returned as data, not raised -- a failing command is a normal outcome.
+        """
+        is_win = "windows" in (guest_os or "").lower()
+        auth = self._vmrun_auth()
+        # The guest picks the temp path (its own %TEMP%/tmp); we can't know it
+        # host-side, so mint it via vmrun. vmcli has no temp-file verb.
+        guest_tmp = self._r.run_vmrun(
+            *auth, "CreateTempfileInGuest", self._vmx
+        ).strip()
+        host_fd, host_tmp = tempfile.mkstemp(suffix=".out")
+        os.close(host_fd)
+        try:
+            if is_win:
+                # *>&1 merges every PS stream; -EncodedCommand carries the wrapper
+                # verbatim (no quote/metacharacter survives the host->vmrun->PS
+                # relay); exit $LASTEXITCODE propagates the guest program's code.
+                inner = (f"& {{ {command_line} }} *>&1 | "
+                         f"Out-File -FilePath '{guest_tmp}' -Encoding utf8 ; "
+                         f"exit $LASTEXITCODE")
+                b64 = base64.b64encode(inner.encode("utf-16-le")).decode("ascii")
+                program, prog_args = _POWERSHELL, ["-NoProfile", "-EncodedCommand", b64]
+            else:
+                inner = f"{{ {command_line}; }} > {guest_tmp} 2>&1; exit $?"
+                program, prog_args = "/bin/sh", ["-c", inner]
+            run_args = list(auth) + ["runProgramInGuest", self._vmx]
+            if interactive:
+                run_args.append("-interactive")
+            run_args += [program] + prog_args
+            # Blocks until the guest command exits; a non-zero exit is data, not
+            # an error, so use the non-raising runner variant.
+            exit_code, _ = self._r.run_vmrun_capture(*run_args)
+            self._r.run_vmrun(
+                *auth, "CopyFileFromGuestToHost", self._vmx, guest_tmp, host_tmp
+            )
+            with open(host_tmp, "rb") as f:
+                output = _decode_captured(f.read(), is_win)
+            return {"output": output, "exit_code": exit_code}
+        finally:
+            try:
+                self._r.run_vmrun(*auth, "deleteFileInGuest", self._vmx, guest_tmp)
+            except VMCtlError:
+                pass
+            try:
+                os.unlink(host_tmp)
+            except OSError:
+                pass
 
     def ps(self) -> dict:
         # vmcli Guest ps supports -f json (verified live); it returns a clean

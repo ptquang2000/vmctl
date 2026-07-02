@@ -49,6 +49,27 @@ class Runner:
     def run_vmrun(self, *args) -> str:
         return self._exec([self.vmrun, "-T", "ws"] + list(args))
 
+    def _exec_capture(self, cmd: list):
+        # Like _exec but does NOT raise on a non-zero exit -- returns
+        # (returncode, stdout). The capture path (exec -t) needs a non-zero guest
+        # exit as data, not an exception: `vmrun runProgramInGuest` propagates the
+        # guest program's own exit code, and a failing guest command is a normal
+        # captured outcome, not a runner failure. Same temp-file capture as _exec
+        # (see there for why pipes would hang).
+        with tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as out, \
+             tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace") as err:
+            result = subprocess.run(
+                cmd, stdin=subprocess.DEVNULL, stdout=out, stderr=err, text=True
+            )
+            out.seek(0)
+            stdout = out.read()
+        return result.returncode, stdout
+
+    def run_vmrun_capture(self, *args):
+        """Run a vmrun subcommand, returning ``(exit_code, stdout)`` without
+        raising on a non-zero exit. For the exec-capture path only."""
+        return self._exec_capture([self.vmrun, "-T", "ws"] + list(args))
+
     def run_vmrun_test(self, *args) -> bool:
         # For the existence-predicate verbs (directoryExistsInGuest,
         # fileExistsInGuest), which invert intuition: path EXISTS -> exit 0

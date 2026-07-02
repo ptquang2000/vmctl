@@ -1,4 +1,3 @@
-import base64
 import sys
 
 import click
@@ -271,54 +270,20 @@ def cmd_clone(name, dest, linked):
 
 
 # ---------------------------------------------------------------------------
-# exec -- headless by default; -t shell wrap, -i desktop
+# exec -- headless by default; -t shell wrap + capture, -i desktop
 # ---------------------------------------------------------------------------
-_POWERSHELL = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+def _build_exec(program_args):
+    """Translate bare `exec` tokens (mode B, no ``-t``) into (program, prog_args).
 
-
-def _ps_encoded_command(cmd: str) -> str:
-    """Encode ``cmd`` for PowerShell's ``-EncodedCommand`` (base64 of UTF-16LE).
-
-    This is PowerShell's documented contract for passing a command verbatim: no
-    quote or shell metacharacter (``|``, ``<``, ``&``, inner ``"``) has to
-    survive escaping across the host -> vmcli -> PowerShell relay.
-    """
-    return base64.b64encode(cmd.encode("utf-16-le")).decode("ascii")
-
-
-def _build_exec(program_args, guest_os: str, tty: bool):
-    """Translate `exec` tokens + the ``-t`` flag into (program, prog_args).
-
-    ``-t`` is the mode selector, not a heuristic on the first token:
-
-    Mode A -- shell wrap (``-t``): the whole command line is handed to the guest
-    shell, so PATH, builtins, pipes, and multiple arguments all work and the pipe
-    is the *guest* shell's pipe. On Windows that shell is PowerShell (an absolute
-    path -- ``--interactive`` does not PATH-resolve), invoked as
-    ``powershell.exe -EncodedCommand <b64>`` (base64 of the UTF-16LE command) so
-    no metacharacter or quote needs to survive the host/vmcli/PowerShell relay.
-    ``-EncodedCommand <b64>`` is one *single* ``programArgs`` token because
-    vmcli's ``Guest run`` accepts only one (a second token errors with
-    "Invalid/unrecognized argument"); the base64 carries no spaces, so
-    powershell.exe re-splits it back into flag + payload. Elsewhere the shell is
-    ``/bin/sh -c <cmd>``. The command string is the space-join of
-    the tokens (the reliable form is one single-quoted host argument carrying the
-    whole pipeline). Detachment is handled by vmcli's ``--noWait`` (see
-    ``cmd_exec``), NOT by a guest-shell launcher.
-
-    Mode B -- explicit program (no ``-t``): ``program = tokens[0]`` and the
-    remaining tokens are reconstructed into vmcli's single allowed ``programArgs``
-    token by re-quoting any token that contains whitespace and joining with
-    spaces. vmcli's ``Guest run`` passes that one token as a raw command-line tail
-    the guest program re-parses, so multiple tokens must collapse into one.
+    Mode B -- explicit program: ``program = tokens[0]`` and the remaining tokens
+    are reconstructed into vmcli's single allowed ``programArgs`` token by
+    re-quoting any token that contains whitespace and joining with spaces.
+    vmcli's ``Guest run`` passes that one token as a raw command-line tail the
+    guest program re-parses, so multiple tokens must collapse into one.
     Inner-quote escaping here is the user's responsibility (the explicit escape
-    hatch); complex-quoting pipelines belong in mode A.
+    hatch); complex-quoting pipelines belong in ``-t`` (mode A), which the guest
+    shell parses and which is handled by ``GuestModule.run_captured``.
     """
-    if tty:
-        cmd = " ".join(program_args)
-        if "windows" in (guest_os or "").lower():
-            return _POWERSHELL, [f"-EncodedCommand {_ps_encoded_command(cmd)}"]
-        return "/bin/sh", ["-c", cmd]
     program, *rest = program_args
     if not rest:
         return program, []
@@ -344,21 +309,29 @@ def _build_exec(program_args, guest_os: str, tty: bool):
 def cmd_exec(name, interactive, tty, program_args):
     """Run a command in the guest; headless by default.
 
-    vmcli `Guest run` only launches -- it never returns the guest program's
-    stdout -- so `exec` captures no output. `-t` wraps through the guest shell,
-    `-i` launches on the interactive desktop, `-it` combines both (the GUI sweet
-    spot: `vmctl exec -it notepad`)."""
+    `-t` runs the command line through the guest shell (PowerShell on Windows,
+    /bin/sh on Linux), waits for it to finish, prints its captured output
+    verbatim, and exits with the guest command's own exit code -- so `exec -t`
+    behaves like a remote shell and pipes/branches cleanly. `-i` launches on the
+    interactive desktop fire-and-forget; `-it` captures output from a command run
+    on that desktop. Bare `exec` (no `-t`) stays fire-and-forget: vmcli
+    `Guest run` only launches, so it prints `launched on <vm>` and returns no
+    output."""
     if not program_args:
         _err("program is required")
     try:
         vm = _resolve(name)
-        guest_os = vm._guest_os if tty else ""
-        program, args = _build_exec(program_args, guest_os, tty)
-        # -t and -i both launch fire-and-forget (--noWait); only a bare,
-        # direct program waits on the launch. exec never returns guest stdout
-        # (a vmcli limitation), so waiting buys nothing for shell-wrapped runs.
-        vm.guest.run(
-            program, *args, no_wait=interactive or tty, interactive=interactive)
+        if tty:
+            # -t / -it: run to completion, print captured output verbatim (no
+            # decoration, so it pipes), and propagate the guest exit code.
+            result = vm.guest.run_captured(
+                " ".join(program_args), vm._guest_os, interactive=interactive)
+            click.echo(result["output"], nl=False)
+            sys.exit(result["exit_code"])
+        program, args = _build_exec(program_args)
+        # Bare program waits on the launch; -i-alone launches fire-and-forget
+        # (--noWait). Neither returns guest stdout (a vmcli limitation).
+        vm.guest.run(program, *args, no_wait=interactive, interactive=interactive)
         click.echo(render.exec_launched(vm.name))
     except (VMCtlError, ValueError) as e:
         _err(str(e))

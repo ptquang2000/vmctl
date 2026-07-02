@@ -15,8 +15,6 @@ call is appended to the controller's ``calls`` log so argument binding and the
 resolved VM name can be asserted without parsing output.
 """
 
-import base64
-
 import click
 import pytest
 from click.testing import CliRunner
@@ -380,11 +378,20 @@ def test_commit_message_is_description(commit_run):
 class GuestRecorder:
     def __init__(self):
         self.calls = []
+        self.captured = []
+        # What run_captured hands back (output + guest exit code). Tests that
+        # care about propagation override this before invoking.
+        self.capture_result = {"output": "OUT", "exit_code": 0}
 
     def run(self, program, *args, no_wait=True, interactive=False):
         self.calls.append({"program": program, "args": list(args),
                            "no_wait": no_wait, "interactive": interactive})
         return {"ran": program}
+
+    def run_captured(self, command_line, guest_os, interactive=False):
+        self.captured.append({"command_line": command_line, "guest_os": guest_os,
+                              "interactive": interactive})
+        return self.capture_result
 
 
 class ExecVM(FakeVM):
@@ -400,8 +407,10 @@ class ExecVM(FakeVM):
 
 @pytest.fixture
 def exec_run(monkeypatch):
-    def _run(args, guest_os="windows9-64", running=("box",)):
+    def _run(args, guest_os="windows9-64", running=("box",), capture_result=None):
         rec = GuestRecorder()
+        if capture_result is not None:
+            rec.capture_result = capture_result
 
         class Ctl(FakeCtl):
             def resolve(self, name):
@@ -438,53 +447,41 @@ def test_exec_bare_multi_arg_succeeds_as_single_token(exec_run):
                           "no_wait": False, "interactive": False}]
 
 
-_PS_EXE = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
-
-
-def _decode_ps_token(arg):
-    """Decode a ``-EncodedCommand <b64>`` token back to its command string.
-
-    vmcli's Guest run takes a single programArgs token, so the flag and the
-    base64 payload are one space-joined token (the base64 has no spaces).
-    """
-    flag, b64 = arg.split(" ", 1)
-    assert flag == "-EncodedCommand"
-    return base64.b64decode(b64).decode("utf-16-le")
-
-
-def _decoded_ps(call):
-    """Decode a mode-A PowerShell -EncodedCommand call back to its command."""
-    assert call["program"] == _PS_EXE
-    assert len(call["args"]) == 1
-    return _decode_ps_token(call["args"][0])
-
-
-def test_exec_tty_windows_wraps_in_powershell(exec_run):
-    result, rec = exec_run(["exec", "-t", "myvm", "notepad", "foo.txt"])
+def test_exec_tty_routes_to_capture_and_prints_output(exec_run):
+    # -t: the joined command line goes to run_captured (not the fire-and-forget
+    # run path), and its captured output is printed verbatim, no "launched" line.
+    result, rec = exec_run(["exec", "-t", "myvm", "notepad", "foo.txt"],
+                           capture_result={"output": "hi there\n", "exit_code": 0})
     assert result.exit_code == 0
-    assert len(rec.calls) == 1
-    assert rec.calls[0]["no_wait"] is True
-    assert rec.calls[0]["interactive"] is False
-    assert _decoded_ps(rec.calls[0]) == "notepad foo.txt"
+    assert rec.calls == []  # not the fire-and-forget path
+    assert rec.captured == [{"command_line": "notepad foo.txt",
+                             "guest_os": "windows9-64", "interactive": False}]
+    assert result.output == "hi there\n"  # verbatim, no decoration
 
 
-def test_exec_tty_windows_pipeline_roundtrips(exec_run):
+def test_exec_tty_pipeline_passes_full_command_line(exec_run):
     pipeline = ('get-content C:\\log.txt | select-string -simplematch '
                 '"server config: <" | select-object -last 1 | set-clipboard')
     result, rec = exec_run(["exec", "-t", "myvm", pipeline])
     assert result.exit_code == 0
-    assert _decoded_ps(rec.calls[0]) == pipeline
+    assert rec.captured[0]["command_line"] == pipeline
 
 
-def test_exec_tty_linux_wraps_in_sh(exec_run):
+def test_exec_tty_passes_guest_os_through(exec_run):
+    # The CLI hands the guest OS to run_captured (which picks /bin/sh vs
+    # PowerShell); it does not build the wrapper itself.
     result, rec = exec_run(["exec", "-t", "myvm", "ls", "-la"], guest_os="ubuntu-64")
-    # -la binds as a program arg (ignore_unknown_options), shell-joined.
     assert result.exit_code == 0
-    assert rec.calls == [{
-        "program": "/bin/sh",
-        "args": ["-c", "ls -la"],
-        "no_wait": True, "interactive": False,
-    }]
+    assert rec.captured == [{"command_line": "ls -la",
+                             "guest_os": "ubuntu-64", "interactive": False}]
+
+
+def test_exec_tty_propagates_guest_exit_code(exec_run):
+    # A non-zero guest exit becomes vmctl's exit code, and the output still prints.
+    result, rec = exec_run(["exec", "-t", "myvm", "false"],
+                           capture_result={"output": "boom\n", "exit_code": 42})
+    assert result.exit_code == 42
+    assert result.output == "boom\n"
 
 
 def test_exec_interactive_adds_interactive_and_nowait(exec_run):
@@ -496,20 +493,20 @@ def test_exec_interactive_adds_interactive_and_nowait(exec_run):
     }]
 
 
-def test_exec_it_combines_shell_and_desktop(exec_run):
+def test_exec_it_captures_on_interactive_desktop(exec_run):
+    # -it: capture path with interactive=True (run on the interactive desktop).
     result, rec = exec_run(["exec", "-it", "myvm", "notepad"])
     assert result.exit_code == 0
-    assert len(rec.calls) == 1
-    assert rec.calls[0]["no_wait"] is True
-    assert rec.calls[0]["interactive"] is True
-    assert _decoded_ps(rec.calls[0]) == "notepad"
+    assert rec.calls == []
+    assert rec.captured == [{"command_line": "notepad",
+                             "guest_os": "windows9-64", "interactive": True}]
 
 
 def test_exec_it_parses_same_as_i_t(exec_run):
     combined, rec1 = exec_run(["exec", "-it", "myvm", "notepad"])
     split, rec2 = exec_run(["exec", "-i", "-t", "myvm", "notepad"])
     assert combined.exit_code == 0 and split.exit_code == 0
-    assert rec1.calls == rec2.calls
+    assert rec1.captured == rec2.captured
 
 
 def test_exec_no_program_errors(exec_run):
@@ -522,21 +519,21 @@ def test_exec_no_program_errors(exec_run):
 
 
 def test_build_exec_bare():
-    assert _build_exec(["ipconfig"], "", tty=False) == ("ipconfig", [])
-    assert _build_exec(["ping", "host"], "", tty=False) == ("ping", ["host"])
+    assert _build_exec(["ipconfig"]) == ("ipconfig", [])
+    assert _build_exec(["ping", "host"]) == ("ping", ["host"])
 
 
 def test_build_exec_bare_multi_arg_collapses_to_one_token():
     # Mode B: more than one arg now succeeds, collapsed into a single token.
-    assert _build_exec(["echo", "a", "b"], "", tty=False) == ("echo", ["a b"])
-    assert _build_exec(["ipconfig", "/all", "/more"], "", tty=False) == (
+    assert _build_exec(["echo", "a", "b"]) == ("echo", ["a b"])
+    assert _build_exec(["ipconfig", "/all", "/more"]) == (
         "ipconfig", ["/all /more"])
 
 
 def test_build_exec_bare_requotes_arg_with_spaces():
     # A token containing whitespace stays grouped by re-quoting.
     assert _build_exec(
-        ["app.exe", r"C:\Program Files\x", "/q"], "", tty=False
+        ["app.exe", r"C:\Program Files\x", "/q"]
     ) == ("app.exe", [r'"C:\Program Files\x" /q'])
 
 
@@ -547,29 +544,7 @@ def test_build_exec_bare_explicit_powershell_forwards():
     # keeping it one programArgs argument for the guest powershell.exe to reparse.
     assert _build_exec(
         ["powershell.exe", "-command", "get-content x | select-string y"],
-        "windows9-64", tty=False,
     ) == ("powershell.exe", ['-command "get-content x | select-string y"'])
-
-
-def test_build_exec_tty_windows():
-    program, args = _build_exec(["notepad", "x"], "windows9-64", tty=True)
-    assert program == _PS_EXE
-    # vmcli accepts a single programArgs token, so flag + payload are one token.
-    assert len(args) == 1
-    assert _decode_ps_token(args[0]) == "notepad x"
-
-
-def test_build_exec_tty_windows_preserves_inner_quotes_and_pipes():
-    pipeline = 'get-content x | select-string -simplematch "a < b" | set-clipboard'
-    program, args = _build_exec([pipeline], "windows9-64", tty=True)
-    assert program == _PS_EXE
-    assert len(args) == 1
-    assert _decode_ps_token(args[0]) == pipeline
-
-
-def test_build_exec_tty_non_windows():
-    assert _build_exec(["ls", "-la"], "ubuntu-64", tty=True) == (
-        "/bin/sh", ["-c", "ls -la"])
 
 
 # --------------------------------------------------------------------------- #
