@@ -58,11 +58,11 @@ exec/copy verbs flatten to the top level, everything else stays grouped.
   `suspend`, `inspect` (absorbs old `power state` + `parse-vmx`), `clone`,
   `exec` (was `guest run`; **headless by default** — `-t/--tty` wraps through the
   guest shell (PowerShell via `-EncodedCommand` on Windows / `/bin/sh -c` on
-  Linux) for PATH/builtins/pipes and detaches at launch; without `-t` you name
-  the program + args directly (mode B); `-i/--interactive` runs on the
-  interactive desktop fire-and-forget for GUI apps (absolute path); `-it` = both
-  (GUI sweet spot, no absolute path); short flags combine (`-it`);
-  no stdout capture since vmcli `Guest run` can't return guest output), `cp`
+  Linux) for PATH/builtins/pipes and **captures the command's output** (see
+  "exec output capture", ADR-0009); without `-t` you name
+  the program + args directly (mode B, fire-and-forget); `-i/--interactive` runs on the
+  interactive desktop for GUI apps (absolute path); `-it` = both
+  (GUI sweet spot, no absolute path, also captured); short flags combine (`-it`)), `cp`
   (merges `copy-to`/`copy-from`, `vm:path` syntax — direction from the
   `vm:` side, leading `:` auto-selects, a one-alpha prefix + `:\`/`:/` is a host
   drive not a VM).
@@ -74,6 +74,37 @@ exec/copy verbs flatten to the top level, everything else stays grouped.
 - **Removed:** the `power` group (flattened), the `guest` group (`guest ps`/
   `kill` dropped so `ps`/`kill` are free for the new top-level meaning), and `fs`,
   `tools`, `vars`, `mks` entirely.
+
+## exec output capture (`-t` / `-it`) — ADR-0009
+
+`exec -t` (and `-it`) **run the command to completion and capture its output** —
+reversing ADR-0006's "exec returns no guest stdout" for these two modes only. The
+mechanism works *around* vmcli's limitation rather than through it:
+
+1. `vmrun CreateTempfileInGuest <vmx>` mints a unique guest-writable temp path
+   (we can't name it host-side — the guest chooses it). vmcli has no temp-file verb.
+2. `vmrun runProgramInGuest` runs the shell wrapper **blocking** (add `-interactive`
+   for `-it`), redirecting *all* streams into that file:
+   - Windows: `powershell -NoProfile -EncodedCommand <b64 of `& { <cmd> } *>&1 | Out-File -FilePath '<gf>' -Encoding utf8 ; exit $LASTEXITCODE`>`
+   - Linux: `/bin/sh -c '{ <cmd>; } > <gf> 2>&1; exit $?'`
+3. `vmrun CopyFileFromGuestToHost` brings it back; host decodes UTF-8 (**strip a
+   leading BOM on Windows** — PS 5.1 `Out-File -Encoding utf8` writes one) and prints
+   it **verbatim to stdout** (pipeable). Streams are merged (`*>&1`/`2>&1`) — guest
+   stderr lands on host stdout; not re-split.
+4. Guest **exit code is propagated** as `vmctl`'s process exit code.
+5. Both temp files are deleted best-effort in a `finally`.
+
+- **vmrun, not vmcli, is mandatory here.** `vmcli Guest run` **never blocks** (returns
+  a PID immediately even without `--noWait`), so it can't signal completion;
+  `vmrun runProgramInGuest` blocks and propagates the guest exit code. This corrects
+  the earlier "vmcli has a synchronous wait" belief.
+- **`-t` is for terminating commands** — it blocks until the command exits (no
+  timeout). Non-terminating programs (servers, `ping -t`) belong on plain
+  fire-and-forget `-i`. Under `-it` a GUI app blocks the CLI until its window closes.
+- **The runner must not raise on non-zero guest exit** — a non-zero code is a normal
+  captured outcome, not a `VMCtlError`; the capture path returns `(exit_code, output)`.
+- Fire-and-forget paths (bare program, `-i` alone) are unchanged and still print
+  `launched on <vm>`.
 
 ## CLI output rendering — human text, JSON is library-only (ADR-0007)
 
@@ -91,7 +122,9 @@ no Click) so it's unit-tested as strings.
 - **Mutations → `verb + canonical name`** (`started windows-10-x64`).
   Synthesized in the CLI (library returns are contentless `{"success": True}`);
   naming the VM discloses auto-select.
-- **`exec`** → `launched on <vm>` (no guest stdout to return — ADR-0006).
+- **`exec`** → captured runs (`-t`/`-it`) print the guest output **verbatim to
+  stdout** and set the process exit code (ADR-0009); fire-and-forget runs (bare
+  program, `-i` alone) print `launched on <vm>`.
   **`cp`** → `copied <src> -> <vm>:<dest>`. **`push`/`sync`** → progress on
   stderr, `pushed …`/`synced <vm>` on stdout. **`auth set`** →
   `credentials set for <name>`.

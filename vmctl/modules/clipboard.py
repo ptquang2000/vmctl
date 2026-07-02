@@ -3,16 +3,22 @@ import tempfile
 import time
 from typing import Callable, Optional
 
+from ..exceptions import VMCtlError
+
 # vmcli "Guest run" accepts the program plus a SINGLE programArgs token (verified
 # live: a second trailing token errors "Invalid/unrecognized argument"). So all
 # Windows guest work is funnelled through cmd.exe with one combined "/c ..." token
-# and cmd re-parses it. Two further live findings shape the recipe below:
-#   * interactive=True breaks output capture for the clipboard read (the program
-#     lands on a desktop whose stdout we don't inherit); interactive=False both
-#     captures stdout AND round-trips the clipboard consistently.
+# and cmd re-parses it. The clipboard the logged-in user sees lives on the
+# interactive desktop's window station (WinSta0\Default); a non-interactive
+# "Guest run" lands on a *separate* window station with its own, invisible
+# clipboard (ADR-0008). So both halves run --interactive to touch the real one.
+# Two further live findings shape the recipe below:
+#   * --interactive does not search PATH, so cmd.exe must be an absolute path
+#     (bare "cmd.exe" fails with "A file was not found").
 #   * vmcli's synchronous wait returns before a nested cmd->powershell grandchild
 #     finishes, so the clipboard *read* is fired with --noWait and its artifact
 #     file is polled until it materialises.
+_CMD_EXE = r"C:\Windows\System32\cmd.exe"
 _PULL_POLL_TIMEOUT_S = 25
 _PULL_POLL_INTERVAL_S = 2
 
@@ -65,11 +71,39 @@ class ClipboardModule:
         self._r.run_vmcli_action(self._vmx, *args)
 
     def _run_cmd(self, command: str, no_wait: bool = False) -> None:
-        """Run a Windows command line as a single cmd.exe ``/c`` token."""
-        self._run_guest("cmd.exe", f"/c {command}", no_wait=no_wait, interactive=False)
+        """Run a Windows command line as a single cmd.exe ``/c`` token.
+
+        Runs ``--interactive`` (so it touches the logged-in desktop's clipboard,
+        not a phantom one) using an absolute cmd path (``--interactive`` does not
+        search ``PATH``).
+        """
+        self._run_guest(_CMD_EXE, f"/c {command}", no_wait=no_wait, interactive=True)
+
+    def _require_interactive_session(self) -> None:
+        """Fail loud unless a logged-in desktop session exists to share.
+
+        No interactive desktop = no clipboard to touch. A cold boot at the
+        login/lock screen reports ``running=true`` but
+        ``GuestCaps.copyPasteGuestVersion=0`` for minutes -- exactly the
+        "reports success but does nothing" case. Gate on ``copyPasteGuestVersion``
+        (the precise capability this feature depends on), not the broader
+        ``guestCapable``. Lives in the module so the library also tells the truth.
+        """
+        from ..runner import _extract_json
+        facts = _extract_json(self._r.run_vmcli(self._vmx, "Tools", "Query", "-f", "json"))
+        running = facts.get("running") is True
+        copy_paste = facts.get("GuestCaps", {}).get("copyPasteGuestVersion", 0)
+        if not (running and copy_paste > 0):
+            raise VMCtlError(
+                f"no interactive guest session (copyPasteGuestVersion={copy_paste}); "
+                "clipboard needs a user logged into the guest desktop -- a VM at "
+                "the login/lock screen can't share its clipboard"
+            )
 
     def push_text(self, text: str) -> dict:
         is_win = self._is_windows_guest()
+        if is_win:
+            self._require_interactive_session()
         guest_clip_path = (
             r"C:\Windows\Temp\vmctl_clip.txt" if is_win else "/tmp/vmctl_clip.txt"
         )
@@ -84,9 +118,9 @@ class ClipboardModule:
             os.unlink(host_tmp)
 
         if is_win:
-            # clip.exe loads stdin into the clipboard. It is a direct child of
-            # cmd, so a synchronous (waited) run reliably completes before we
-            # return -- guaranteeing the clipboard is set before any pull.
+            # clip.exe loads stdin into the clipboard. Under --interactive it is
+            # a direct child of cmd, so a synchronous (waited) run still reliably
+            # completes and sets the clipboard before we return (verified live).
             self._run_cmd(f"clip < {guest_clip_path}", no_wait=False)
         else:
             self._run_guest("bash", "-c", f"xclip -selection clipboard < {guest_clip_path}")
@@ -94,6 +128,8 @@ class ClipboardModule:
 
     def pull_text(self) -> dict:
         is_win = self._is_windows_guest()
+        if is_win:
+            self._require_interactive_session()
         guest_out_path = (
             r"C:\Windows\Temp\vmctl_clip_out.txt" if is_win else "/tmp/vmctl_clip_out.txt"
         )

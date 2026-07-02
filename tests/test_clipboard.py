@@ -8,10 +8,25 @@ from vmctl.modules.clipboard import ClipboardModule
 WINDOWS_CONFIG = {"guestOS": "windows9-64", "displayName": "TestVM"}
 LINUX_CONFIG = {"guestOS": "ubuntu-64", "displayName": "TestVM"}
 
+# An interactive desktop session: running + a live copy/paste capability. The
+# gate passes on this; a login-screen guest reports copyPasteGuestVersion=0.
+_INTERACTIVE = '{"running": true, "GuestCaps": {"copyPasteGuestVersion": 4}}'
 
-def make_module(config_data):
+
+def make_module(config_data, tools_query=_INTERACTIVE):
+    """Build a module whose runner answers both vmcli queries it makes:
+
+    ``ConfigParams query`` -> guestOS (for guest-type detection) and
+    ``Tools Query`` -> the interactive-session facts (for the fail-loud gate).
+    """
     runner = MagicMock()
-    runner.run_vmcli.return_value = '{"guestOS": "%s"}' % config_data["guestOS"]
+
+    def _run_vmcli(_vmx, *args):
+        if "Tools" in args:
+            return tools_query
+        return '{"guestOS": "%s"}' % config_data["guestOS"]
+
+    runner.run_vmcli.side_effect = _run_vmcli
     runner.run_vmcli_action.return_value = {"success": True}
     return ClipboardModule("fake.vmx", runner, {"user": "u", "password": "p"})
 
@@ -24,8 +39,13 @@ def test_push_text_windows_uses_clip():
         mock_tf.return_value.__enter__.return_value.write = MagicMock()
         mod.push_text("hello world")
     calls = [str(c) for c in mod._r.run_vmcli_action.call_args_list]
-    # Windows push loads the clipboard via cmd.exe -> clip.exe (single token).
-    assert any("clip" in c and "cmd.exe" in c for c in calls)
+    # Windows push loads the clipboard via cmd.exe -> clip.exe (single token),
+    # run --interactive against the absolute cmd path so it hits the desktop's
+    # real clipboard rather than a phantom non-interactive one (ADR-0008).
+    assert any(
+        "clip" in c and "--interactive" in c and r"C:\\Windows\\System32\\cmd.exe" in c
+        for c in calls
+    )
 
 
 def test_push_text_linux_uses_xclip():
@@ -142,6 +162,11 @@ def test_pull_text_windows_reads_via_powershell_get_clipboard():
     calls = [str(c) for c in mod._r.run_vmcli_action.call_args_list]
     assert any("Get-Clipboard" in c and "vmctl_clip_out.txt" in c for c in calls)
     assert any("del /q" in c for c in calls)  # stale artifact cleared first
+    # Both cmd runs are --interactive against the absolute cmd path (ADR-0008).
+    assert all(
+        "--interactive" in c and r"C:\\Windows\\System32\\cmd.exe" in c
+        for c in calls
+    )
 
 
 def test_pull_text_linux_reads_via_xclip():
@@ -157,6 +182,62 @@ def test_pull_text_linux_missing_file_yields_empty_string():
     mod = make_module(LINUX_CONFIG)
     with patch.object(mod, "_read_guest_file", return_value=None):
         assert mod.pull_text() == {"text": ""}
+
+
+# --------------------------------------------------------------------------- #
+# fail-loud interactive-session gate (ADR-0008, user stories 5/8/12)          #
+# --------------------------------------------------------------------------- #
+
+
+def _tools_query_calls(mod):
+    return [c for c in mod._r.run_vmcli.call_args_list if "Tools" in c.args]
+
+
+def test_push_queries_tools_before_guest_op():
+    mod = make_module(WINDOWS_CONFIG)
+    _push(mod)
+    assert _tools_query_calls(mod), "push must gate on a Tools Query first"
+
+
+def test_pull_queries_tools_before_guest_op():
+    mod = make_module(WINDOWS_CONFIG)
+    with patch.object(mod, "_read_guest_file", return_value="x"):
+        mod.pull_text()
+    assert _tools_query_calls(mod), "pull must gate on a Tools Query first"
+
+
+def test_push_raises_when_no_interactive_session():
+    mod = make_module(WINDOWS_CONFIG, tools_query='{"running": true, "GuestCaps": {"copyPasteGuestVersion": 0}}')
+    with pytest.raises(cb.VMCtlError, match="copyPasteGuestVersion=0"):
+        _push(mod)
+    # Fail loud BEFORE touching the guest -- no copyTo/clip fired.
+    mod._r.run_vmcli_action.assert_not_called()
+
+
+def test_pull_raises_when_no_interactive_session():
+    mod = make_module(WINDOWS_CONFIG, tools_query='{"running": true, "GuestCaps": {"copyPasteGuestVersion": 0}}')
+    with pytest.raises(cb.VMCtlError, match="copyPasteGuestVersion=0"):
+        mod.pull_text()
+    mod._r.run_vmcli_action.assert_not_called()
+
+
+def test_gate_raises_when_not_running():
+    mod = make_module(WINDOWS_CONFIG, tools_query='{"running": false, "GuestCaps": {"copyPasteGuestVersion": 4}}')
+    with pytest.raises(cb.VMCtlError):
+        _push(mod)
+
+
+def test_gate_passes_when_capability_present():
+    # copyPasteGuestVersion > 0 AND running -> no raise (the interactive case).
+    _push(make_module(WINDOWS_CONFIG))  # _INTERACTIVE default; would raise if gated wrong
+
+
+def test_linux_push_is_not_gated():
+    # No proven equivalent signal on Linux; the xclip path carries no gate and
+    # must not issue a Tools Query.
+    mod = make_module(LINUX_CONFIG, tools_query="unused")
+    _push(mod)
+    assert not _tools_query_calls(mod)
 
 
 # --------------------------------------------------------------------------- #
