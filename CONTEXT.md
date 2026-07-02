@@ -141,20 +141,56 @@ Both reads and writes use vmrun when vmcli can't serve them: `power.state()` rea
 - `-wait` intentionally **not** exposed (can hang forever; callers poll). `-snapshot=` irrelevant and ignored.
 - **Resume wedges the VIX channel — falls back to `guestinfo.ip`.** After resuming a suspended/memory snapshot, `getGuestIPAddress` can fail with `The VMware Tools are not running` for the **whole resumed session** even though Tools are up (it gates on a VIX heartbeat the resume leaves wedged; only a guest **reboot** fixes it). Since `getGuestIPAddress` ≈ `guestinfo.ip` + heartbeat gate, `ip()` catches the "not running" failure and falls back to `vmrun readVariable <vmx> guestVar ip` (no heartbeat, no creds). Fires **only** on "not running" — "not powered on" still raises, so an off VM is never masked. If cached `guestinfo.ip` is also empty, the original error re-raises. (Verified 2026-06-25.)
 
-## Guest file copy (`guest.copy_to` / `guest.copy_from`)
+## Guest file copy (`guest.copy_to` / `guest.copy_from`) — vmrun VIX backend (ADR-0010)
 
-`vmcli Guest copyTo/copyFrom` require `<toPath>` to be a full **file** path.
+`cp` is the **single-file** host↔guest copy over VMware Tools. Both directions
+run the **vmrun VIX** verbs (not `vmcli Guest copyTo/copyFrom`), with guest creds
+as `-gu <user> -gp <pass>` **before** the verb (the `vars.py` `guestEnv` convention):
+`copy_to` → `CopyFileFromHostToGuest <vmx> <host> <guest>`; `copy_from` →
+`CopyFileFromGuestToHost <vmx> <guest> <host>`.
 
-- **Directory destinations are rejected** — `C:\`, `C:\Users`, bare `C:` fail with `The object is not a file` (a guest-side stat, not a string check). vmctl applies cp/scp semantics for *explicit* directory forms (trailing `\`/`/`, or bare drive root) by appending the source basename; an existing dir given without a trailing separator can't be detected locally and raises an actionable `VMCtlError`.
-- **Direction-sensitive** — for `copy_to` the dir is the guest **dest**; for `copy_from` the guest **source**. `copy_from` to an existing *host* dir reports `File already exists`, not `not a file`.
-- **Large files fail — small-files-by-design.** Pinned live: **≤60 KB OK, ≥64 KB fails** with opaque `Unknown error` and the file doesn't land (gray zone in (60 KB, 64 KB]). Not a permission issue. `guest.copy_to` **refuses up front** any file > `_COPY_TO_MAX_BYTES = 60*1024` with an actionable error; it doesn't call vmcli. If the host file can't be stat'd, the size check is skipped. **For large transfers use an HGFS share** (`shares add`) **or `push`** (SSH/SFTP).
+- **No size wall (ADR-0010).** The ~64 KB ceiling was `vmcli Guest copyTo`-specific
+  (65400 B OK / 65401 B → opaque `Unknown error` + 0-byte stub). vmrun's VIX
+  channel is unbounded both directions (verified: 6.5 MB/50 MB in, 1 GB out). The
+  old `_COPY_TO_MAX_BYTES` guard, `_LARGE_FILE_HINT`, and the vmcli "not a file"
+  re-raises are **gone** — the 6.5 MB MSI copies with no HGFS/SSH detour.
+- **Single-file only; directories → `push`.** Neither backend copies trees. A
+  directory **source** is refused up front with an actionable error naming
+  `vmctl push` (which does trees natively over SSH/sss). vmctl does **not**
+  hand-roll a tree-walk. The guard is proactive and symmetric: `copy_to` checks
+  `os.path.isdir(host)`; `copy_from` checks `vmrun directoryExistsInGuest <path>`.
+- **`directoryExistsInGuest`/`fileExistsInGuest` — inverted exit code.** exists →
+  exit 0 (`"The … exists."`); absent → exit **127** (`"The … does not exist."`,
+  stdout only, empty stderr). Since `Runner._exec` raises on any nonzero code, the
+  boolean-false would look like a real failure — so `Runner.run_vmrun_test(*args)
+  -> bool` runs the verb without raising, parses **stdout** (`"exists."` & not
+  `"does not"` → True; `"does not exist"` → False; anything else → raise). One
+  helper owns the string-matching; `run_vmrun` is untouched for the copy verbs.
+- **Path arithmetic unchanged.** `_split_vm_path`, `_resolve_dest`, `_basename`,
+  `_is_abs` (cp/scp trailing-slash + bare-drive-root resolution) are
+  backend-independent and survive verbatim. Missing / access-locked sources are
+  left to vmrun's own legible errors (`A file was not found` / `access rights`,
+  finding #25) — no redundant pre-flight.
+- **`-o/--overwrite` is enforced by vmctl, not vmrun.** vmrun's copy verbs
+  *always* overwrite (verified live 2026-07-02: a second `CopyFileFromHostToGuest`
+  onto an existing dest returns exit 0, no refusal). To keep the flag meaningful,
+  each direction pre-flights the *destination* when `-o` is absent and refuses if
+  it exists — `fileExistsInGuest` for `copy_to`'s guest dest, `os.path.exists` for
+  `copy_from`'s host dest. With `-o` the pre-flight is skipped and vmrun's native
+  overwrite takes over.
+- **Guest ops run under vmtoolsd/SYSTEM privilege**, so no guest destination path
+  restrains the copy (`C:\`, `C:\Windows\`, `C:\Program Files\` all accept writes).
 - **No programmatic copy-paste / drag-and-drop.** The GUI host↔guest file CP/DnD has **no CLI/API/RPC** — it's a GUI-only feature of Workstation + `vmtoolsd -n vmusr` on the CP/DnD backdoor channel, undrivable by vmcli/vmrun. Do not re-investigate. The `clipboard` module handles **text only**, unrelated to file paste.
 
-## clipboard text (push / pull)
+## clipboard text (push / pull) — the host↔guest text bridge (ADR-0008)
 
-The `clipboard` module round-trips the **guest text clipboard** by staging a temp file via `Guest copyTo`/`copyFrom` and driving the native tool: Windows pushes via `clip.exe`, pulls via `powershell Get-Clipboard`; Linux uses `xclip`. Guest OS sniffed once via `ConfigParams query` (`guestOS`), with a `guest_os_fn` injection seam for tests.
+The `clipboard` module is the **host↔guest text bridge**: `push` sets the guest's clipboard (Ctrl+V-able by the logged-in user; feed the host clipboard in via `Get-Clipboard | vmctl clipboard push`), `pull` prints the guest clipboard to host stdout (pipe into the host's `Set-Clipboard`). It round-trips by staging a temp file via `Guest copyTo`/`copyFrom` and driving the native tool: Windows pushes via `clip.exe`, pulls via `powershell Get-Clipboard`; Linux uses `xclip`. Guest OS sniffed once via `ConfigParams query` (`guestOS`), with a `guest_os_fn` injection seam for tests.
 
-- **Windows pull is `--noWait` + poll, not synchronous** — vmcli's synchronous wait returns before the nested `cmd → powershell` grandchild finishes, so the read fires `--noWait` and its artifact file is polled (`_poll_guest_file`, bounded by `_PULL_POLL_TIMEOUT_S`); on timeout returns `""`. Push uses `clip.exe` as a **direct** child of cmd, so a waited run reliably sets the clipboard before return.
+- **Interactive-session clipboard, NOT the phantom one (ADR-0008).** Both halves run `vmcli Guest run --interactive` so they touch the logged-in desktop's clipboard (`WinSta0\Default`). A *non*-interactive `Guest run` has its own separate window-station clipboard, invisible to the user — the source of the old "reports success but pastes nothing" bug (push→pull was self-consistent against the phantom clipboard). Proven live 2026-07-02.
+- **`--interactive` does not search `PATH`** — the program must be an absolute path (`C:\Windows\System32\cmd.exe`), else vmcli errors `A file was not found`.
+- **Precondition gate — fail loud (ADR-0008).** No logged-in desktop = no clipboard to touch. `push_text`/`pull_text` each run `Tools Query` first and raise `VMCtlError` unless `running is True AND GuestCaps.copyPasteGuestVersion > 0`. A cold boot at the login/lock screen reports `running=true` but `copyPasteGuestVersion=0` for minutes — that's the "does nothing" case, now a clear error. Gate lives in the **module** so the library also tells the truth.
+- **Windows pull is `--noWait` + poll, not synchronous** — vmcli's synchronous wait returns before the nested `cmd → powershell` grandchild finishes, so the read fires `--noWait` and its artifact file is polled (`_poll_guest_file`, bounded by `_PULL_POLL_TIMEOUT_S`); on timeout (or genuinely empty clipboard) returns `""`. Push uses `clip.exe` as a **direct** child of cmd, so a waited run (`--interactive`, `no_wait=False`) reliably sets the clipboard before return.
+- **Linux is unverified (ADR-0008).** The `xclip` path shares the isolation class (needs the X session's `DISPLAY`) but no Linux guest exists to verify it; it's best-effort and carries no session gate. Do not claim it works.
 - **`clipboard push` lone-token case.** Both positionals (`name`, `text`) are optional, so `clipboard push hello` binds `hello` to the **VM name**. We don't silently reinterpret it (would violate *no silent fill*). It raises an actionable error naming the three working forms:
   - **pipe:** `echo hello | vmctl clipboard push` (text omitted ⇒ non-tty stdin read; no `--` needed with no trailing positional),
   - **leading `--`:** `vmctl clipboard push -- hello` (the `--` fills the name slot),
@@ -177,11 +213,12 @@ The seam is **`vm.sync`** (a `SyncModule`), surfaced as **`vmctl sync`** and **`
 
 ### Two file-into-guest paths (opposite dest and size rules)
 
-| | `guest copy-to` | `push` (sss / SSH) |
+| | `cp` (`guest.copy_to`/`copy_from`) | `push` (sss / SSH) |
 |---|---|---|
-| Channel | `vmcli Guest copyTo` (Tools) | SSH / SFTP (needs sshd) |
-| Dest arg | full **file** path — dir rejected | remote **directory** — lands at `dest/<basename>` |
-| Size | **≤ 60 KB** (refused above) | unbounded |
+| Channel | `vmrun` VIX (Tools) | SSH / SFTP (needs sshd) |
+| Source | single **file** — dir refused (→ `push`) | file or **directory** (tree) |
+| Dest arg | full **file** path (dir forms resolved cp/scp-style) | remote **directory** — lands at `dest/<basename>` |
+| Size | **unbounded** (vmrun has no wall) | unbounded |
 | Needs | Tools running | OpenSSH server + reachable guest IP |
 
-A `dest` that works for `push` (a directory) is rejected by `copy-to`; a file too big for `copy-to` is exactly what `push` is for. Help strings cross-reference each other.
+`cp` is single-file over Tools (any size, ADR-0010); a **directory** is exactly what `push` is for. Help strings cross-reference each other.

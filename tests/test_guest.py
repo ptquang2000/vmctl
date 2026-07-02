@@ -6,7 +6,6 @@ from vmctl.modules.guest import (
     GuestModule,
     _basename,
     _resolve_dest,
-    _COPY_TO_MAX_BYTES,
 )
 from vmctl.exceptions import VMCtlError
 
@@ -14,17 +13,21 @@ from vmctl.exceptions import VMCtlError
 def make_module():
     runner = MagicMock()
     runner.run_vmcli_action.return_value = {"success": True}
+    runner.run_vmrun.return_value = ""
+    # Default: nothing pre-exists (dir-source guard False, dest-exists guard
+    # False). Individual tests override.
+    runner.run_vmrun_test.return_value = False
     return GuestModule("fake.vmx", runner, {"user": "test", "password": "test"})
 
 
 def _to_path(mod):
-    # The guest dest is the last positional in the copyTo arg list.
-    return mod._r.run_vmcli_action.call_args.args[-1]
+    # The guest dest is the last positional in the CopyFileFromHostToGuest argv.
+    return mod._r.run_vmrun.call_args.args[-1]
 
 
 def _from_path_host_dest(mod):
-    # The host dest is the last positional in the copyFrom arg list.
-    return mod._r.run_vmcli_action.call_args.args[-1]
+    # The host dest is the last positional in the CopyFileFromGuestToHost argv.
+    return mod._r.run_vmrun.call_args.args[-1]
 
 
 # --- run() arg-ordering tests ---
@@ -122,48 +125,47 @@ def test_copy_to_resolves_dest(dest, expected):
     assert _to_path(mod) == expected
 
 
-def test_copy_to_overwrite_flag_and_order():
+def test_copy_to_emits_vmrun_verb_with_creds_and_order():
     mod = make_module()
     mod.copy_to("D:\\host\\OpenSSH.msi", "C:\\dst.msi", overwrite=True)
-    args = mod._r.run_vmcli_action.call_args.args
-    assert args[0] == "fake.vmx"
-    assert "--overwrite" in args
-    # source precedes dest
-    assert args.index("D:\\host\\OpenSSH.msi") < args.index("C:\\dst.msi")
+    args = list(mod._r.run_vmrun.call_args.args)
+    verb_idx = args.index("CopyFileFromHostToGuest")
+    # creds precede the verb
+    assert args[:verb_idx] == ["-gu", "test", "-gp", "test"]
+    # verb <vmx> <host> <guest>, source before dest
+    assert args[verb_idx:] == [
+        "CopyFileFromHostToGuest", "fake.vmx",
+        "D:\\host\\OpenSSH.msi", "C:\\dst.msi",
+    ]
 
 
-def test_copy_to_translates_not_a_file():
+def test_copy_to_refuses_directory_source(monkeypatch):
     mod = make_module()
-    mod._r.run_vmcli_action.side_effect = VMCtlError(
-        "vmcli.exe: The object is not a file"
-    )
-    with pytest.raises(VMCtlError, match="guest destination 'C:\\\\Users' is a directory"):
-        mod.copy_to("D:\\host\\OpenSSH.msi", "C:\\Users")
+    monkeypatch.setattr("os.path.isdir", lambda p: True)
+    with pytest.raises(VMCtlError, match="vmctl push"):
+        mod.copy_to("D:\\host\\dir", "C:\\dst\\")
+    # Refused up front -- no copy attempted.
+    mod._r.run_vmrun.assert_not_called()
 
 
-def test_copy_to_other_errors_propagate():
+def test_copy_to_refuses_existing_dest_without_overwrite():
     mod = make_module()
-    mod._r.run_vmcli_action.side_effect = VMCtlError("Unknown error")
-    with pytest.raises(VMCtlError, match="Unknown error"):
-        mod.copy_to("D:\\host\\OpenSSH.msi", "C:\\Users\\test\\x.msi")
+    mod._r.run_vmrun_test.return_value = True  # dest exists
+    with pytest.raises(VMCtlError, match="already exists"):
+        mod.copy_to("D:\\host\\OpenSSH.msi", "C:\\dst.msi")
+    mod._r.run_vmrun.assert_not_called()
+    # The existence pre-flight used fileExistsInGuest against the resolved dest.
+    test_args = mod._r.run_vmrun_test.call_args.args
+    assert "fileExistsInGuest" in test_args
+    assert test_args[-1] == "C:\\dst.msi"
 
 
-def test_copy_to_rejects_large_file(tmp_path):
+def test_copy_to_overwrite_skips_existence_check():
     mod = make_module()
-    big = tmp_path / "big.msi"
-    big.write_bytes(b"\0" * (_COPY_TO_MAX_BYTES + 1))
-    with pytest.raises(VMCtlError, match="too large for 'guest copy-to'"):
-        mod.copy_to(str(big), "C:\\big.msi")
-    # Refused up front -- vmcli must not have been invoked.
-    mod._r.run_vmcli_action.assert_not_called()
-
-
-def test_copy_to_allows_at_limit_file(tmp_path):
-    mod = make_module()
-    ok = tmp_path / "ok.txt"
-    ok.write_bytes(b"\0" * _COPY_TO_MAX_BYTES)
-    mod.copy_to(str(ok), "C:\\ok.txt")
-    mod._r.run_vmcli_action.assert_called_once()
+    mod._r.run_vmrun_test.return_value = True
+    mod.copy_to("D:\\host\\OpenSSH.msi", "C:\\dst.msi", overwrite=True)
+    mod._r.run_vmrun_test.assert_not_called()
+    mod._r.run_vmrun.assert_called_once()
 
 
 # --- copy_from dest (host) resolution ---
@@ -179,10 +181,50 @@ def test_copy_from_resolves_host_dest(dest, expected):
     assert _from_path_host_dest(mod) == expected
 
 
-def test_copy_from_translates_not_a_file_as_source():
+def test_copy_from_emits_vmrun_verb_with_creds_and_order():
     mod = make_module()
-    mod._r.run_vmcli_action.side_effect = VMCtlError(
-        "vmcli.exe: The object is not a file"
-    )
-    with pytest.raises(VMCtlError, match="guest source 'C:\\\\Users\\\\test' is a directory"):
+    mod.copy_from("C:\\Users\\test\\probe.txt", "D:\\host\\out.txt")
+    args = list(mod._r.run_vmrun.call_args.args)
+    verb_idx = args.index("CopyFileFromGuestToHost")
+    assert args[:verb_idx] == ["-gu", "test", "-gp", "test"]
+    # verb <vmx> <guest> <host>, source before dest
+    assert args[verb_idx:] == [
+        "CopyFileFromGuestToHost", "fake.vmx",
+        "C:\\Users\\test\\probe.txt", "D:\\host\\out.txt",
+    ]
+
+
+def test_copy_from_checks_directory_first_and_refuses():
+    mod = make_module()
+    mod._r.run_vmrun_test.return_value = True  # guest source is a directory
+    with pytest.raises(VMCtlError, match="vmctl push"):
         mod.copy_from("C:\\Users\\test", "D:\\host\\out.txt")
+    # directoryExistsInGuest ran against the guest source; no copy attempted.
+    test_args = mod._r.run_vmrun_test.call_args.args
+    assert "directoryExistsInGuest" in test_args
+    assert test_args[-1] == "C:\\Users\\test"
+    mod._r.run_vmrun.assert_not_called()
+
+
+def test_copy_from_proceeds_when_source_not_directory():
+    mod = make_module()
+    mod._r.run_vmrun_test.return_value = False
+    mod.copy_from("C:\\Users\\test\\probe.txt", "D:\\host\\out.txt")
+    mod._r.run_vmrun.assert_called_once()
+
+
+def test_copy_from_refuses_existing_host_dest_without_overwrite(tmp_path):
+    mod = make_module()
+    existing = tmp_path / "out.txt"
+    existing.write_text("old")
+    with pytest.raises(VMCtlError, match="already exists"):
+        mod.copy_from("C:\\Users\\test\\probe.txt", str(existing))
+    mod._r.run_vmrun.assert_not_called()
+
+
+def test_copy_from_overwrite_allows_existing_host_dest(tmp_path):
+    mod = make_module()
+    existing = tmp_path / "out.txt"
+    existing.write_text("old")
+    mod.copy_from("C:\\Users\\test\\probe.txt", str(existing), overwrite=True)
+    mod._r.run_vmrun.assert_called_once()

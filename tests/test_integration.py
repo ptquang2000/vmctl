@@ -376,6 +376,49 @@ def test_guest_copy_roundtrip(guest_vm):
     assert content.strip() == payload
 
 
+def _ensure_guest_dir(vm, path):
+    # Group fixtures are one-boot/many-tests, so TEST_DIR may already exist from
+    # an earlier test in the group; vmcli mkdir errors on an existing dir.
+    try:
+        vm.fs.mkdir(path)
+    except VMCtlError as e:
+        if "already exists" not in str(e).lower():
+            raise
+
+
+def test_guest_copy_large_file_roundtrip(guest_vm):
+    # Proves the ~64 KB vmcli wall is gone: a >65400-byte file must copy in and
+    # back out byte-identical over the vmrun VIX backend (ADR-0010).
+    _ensure_guest_dir(guest_vm, TEST_DIR)
+    payload = os.urandom(2 * 1024 * 1024)  # 2 MB, well past the old 65400 wall
+    with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as f:
+        f.write(payload)
+        host_in = f.name
+    with tempfile.NamedTemporaryFile(suffix=".bin", delete=False) as f:
+        host_out = f.name
+    try:
+        guest_vm.guest.copy_to(host_in, rf"{TEST_DIR}\big.bin", overwrite=True)
+        guest_vm.guest.copy_from(rf"{TEST_DIR}\big.bin", host_out, overwrite=True)
+        with open(host_out, "rb") as f:
+            got = f.read()
+    finally:
+        os.unlink(host_in)
+        os.unlink(host_out)
+    assert got == payload
+
+
+def test_guest_copy_refuses_directory_source(guest_vm):
+    # cp is single-file; a directory source is refused up front both directions,
+    # naming `vmctl push` (ADR-0010).
+    _ensure_guest_dir(guest_vm, TEST_DIR)
+    with tempfile.TemporaryDirectory() as host_dir:
+        with pytest.raises(VMCtlError, match="push"):
+            guest_vm.guest.copy_to(host_dir, rf"{TEST_DIR}\x.txt")
+    with pytest.raises(VMCtlError, match="push"):
+        # TEST_DIR is a directory in the guest -> copy_from must refuse.
+        guest_vm.guest.copy_from(TEST_DIR, tempfile.gettempdir() + os.sep + "x.txt")
+
+
 # --- sync/push (sss over SSH) -------------------------------------------------
 # These share the guest_vm boot (no new cycle). They require the prerequisite an
 # OpenSSH server in the ``init`` snapshot reachable as test/test on port 22 (see

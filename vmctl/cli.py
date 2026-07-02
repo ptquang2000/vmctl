@@ -394,8 +394,7 @@ def cmd_cp(src, dst, overwrite):
     Direction is inferred from which side carries the `vm:` prefix:
     `vmctl cp ./f myvm:C:\\dir` (host->guest), `vmctl cp myvm:C:\\f ./` (guest->
     host). A leading `:` auto-selects the running VM (`vmctl cp ./f :C:\\dir`).
-    Subject to `guest copy-to`'s limits (<=60 KB, file dest); for large files use
-    `vmctl push`."""
+    Copies a single file of any size. For directory trees use `vmctl push`."""
     try:
         src_vm, src_path = _split_vm_path(src)
         dst_vm, dst_path = _split_vm_path(dst)

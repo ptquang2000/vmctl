@@ -49,6 +49,27 @@ class Runner:
     def run_vmrun(self, *args) -> str:
         return self._exec([self.vmrun, "-T", "ws"] + list(args))
 
+    def run_vmrun_test(self, *args) -> bool:
+        # For the existence-predicate verbs (directoryExistsInGuest,
+        # fileExistsInGuest), which invert intuition: path EXISTS -> exit 0
+        # (stdout "The ... exists."); ABSENT -> exit 127 (stdout "The ... does
+        # not exist.", empty stderr). _exec raises on any nonzero code, so a
+        # normal "false" would arrive as an exception indistinguishable from a
+        # real failure. Run without letting that raise, then parse stdout:
+        # "exists." and not "does not" -> True; "does not exist" -> False;
+        # anything else (auth failure, VM off, Tools wedged) -> raise. This is
+        # the ONLY consumer of the inverted-exit-code contract.
+        try:
+            out = self._exec([self.vmrun, "-T", "ws"] + list(args))
+        except VMCtlError as e:
+            out = (e.stderr or "") + (str(e) or "")
+        low = out.lower()
+        if "does not exist" in low:
+            return False
+        if "exists." in low and "does not" not in low:
+            return True
+        raise VMCtlError(out.strip() or "vmrun existence check failed")
+
 
 def _extract_json(text: str) -> dict:
     match = re.search(r"[{\[]", text)

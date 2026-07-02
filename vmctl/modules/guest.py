@@ -4,20 +4,6 @@ from typing import Optional
 
 from ..exceptions import VMCtlError
 
-# vmcli Guest copyTo silently fails on sizeable files: ≤60 KB copies fine,
-# ≥64 KB fails with an opaque "Unknown error" and the file never lands in the
-# guest (verified live against vmctl, 2026-06-22). The wall sits in the
-# (60 KB, 64 KB] gray zone; we refuse at the highest proven-good size rather than
-# attempt a transfer that fails silently mid-flight. See CONTEXT.md "Guest file
-# copy".
-_COPY_TO_MAX_BYTES = 60 * 1024
-
-_LARGE_FILE_HINT = (
-    "is too large for 'guest copy-to' (limit {limit} bytes; vmcli Guest copyTo "
-    "fails silently on larger files). For sizeable payloads use an HGFS shared "
-    "folder ('vmctl shares add <host_dir>') or push over SSH ('vmctl push')."
-)
-
 
 def _is_abs(path: str) -> bool:
     # Treat a Windows drive-absolute ("C:\..."), UNC ("\\host\..."), or POSIX
@@ -32,11 +18,11 @@ def _basename(path: str) -> str:
 
 
 def _resolve_dest(dest: str, source: str) -> str:
-    # vmcli copyTo/copyFrom require <toPath> to be a full FILE path; a directory
-    # is rejected with "The object is not a file". Apply cp/scp semantics when
-    # the destination is written with explicit directory intent -- it ends in a
-    # separator, or is a bare drive root like "C:" -- by appending the source's
-    # basename so the file keeps its name inside that directory.
+    # The VIX copy verbs require the destination to be a full FILE path; a bare
+    # directory won't receive the file under its source name. Apply cp/scp
+    # semantics when the destination is written with explicit directory intent --
+    # it ends in a separator, or is a bare drive root like "C:" -- by appending
+    # the source's basename so the file keeps its name inside that directory.
     if dest.endswith(("\\", "/")):
         return dest + _basename(source)
     if re.fullmatch(r"[A-Za-z]:", dest):
@@ -57,6 +43,14 @@ class GuestModule:
         if self._creds.get("password"):
             args += ["--password", self._creds["password"]]
         return args
+
+    def _vmrun_auth(self) -> list:
+        # vmrun's guest verbs take creds as `-gu <user> -gp <pass>` BEFORE the
+        # verb (the vars.py guestEnv convention), unlike vmcli's --username/
+        # --password.
+        if self._creds.get("user"):
+            return ["-gu", self._creds["user"], "-gp", self._creds.get("password", "")]
+        return []
 
     def run(
         self,
@@ -104,55 +98,52 @@ class GuestModule:
         return self._r.run_vmcli_action(self._vmx, *args)
 
     def copy_to(self, host_path: str, guest_path: str, overwrite: bool = False) -> dict:
-        # Refuse oversize files up front rather than let vmcli attempt a transfer
-        # that fails silently (opaque "Unknown error", file never lands). If the
-        # host file can't be stat'd (e.g. does not exist), skip the check so
-        # unrelated errors keep surfacing from vmcli unchanged.
-        try:
-            size = os.path.getsize(host_path)
-        except OSError:
-            size = None
-        if size is not None and size > _COPY_TO_MAX_BYTES:
+        # cp is single-file; a directory source is refused up front with an
+        # actionable pointer to `vmctl push` (which does trees natively over
+        # SSH). Local check -- no wasted VIX round-trip.
+        if os.path.isdir(host_path):
             raise VMCtlError(
-                f"'{host_path}' " + _LARGE_FILE_HINT.format(limit=_COPY_TO_MAX_BYTES)
+                f"'{host_path}' is a directory; 'vmctl cp' copies a single "
+                f"file. For directory trees use 'vmctl push'."
             )
         # guest_path is the destination; resolve directory-intent forms to a
         # full file path (cp/scp semantics).
         guest_path = _resolve_dest(guest_path, host_path)
-        args = ["Guest", "copyTo"] + self._cred_args()
-        if overwrite:
-            args.append("--overwrite")
-        args += [host_path, guest_path]
-        try:
-            return self._r.run_vmcli_action(self._vmx, *args)
-        except VMCtlError as e:
-            # Residual case: an existing guest directory given without a trailing
-            # separator (e.g. C:\Users) can't be detected locally; vmcli rejects
-            # it as "The object is not a file" -- here that means the dest.
-            if "not a file" in str(e).lower():
-                raise VMCtlError(
-                    f"guest destination '{guest_path}' is a directory; "
-                    f"append a filename or a trailing separator (e.g. "
-                    f"'{guest_path.rstrip(chr(92) + '/')}\\')"
-                ) from e
-            raise
+        auth = self._vmrun_auth()
+        # vmrun's copy verbs always overwrite; enforce -o ourselves so the flag
+        # keeps meaning -- refuse an existing dest unless overwrite was asked.
+        if not overwrite and self._r.run_vmrun_test(
+            *auth, "fileExistsInGuest", self._vmx, guest_path
+        ):
+            raise VMCtlError(
+                f"guest destination '{guest_path}' already exists; pass "
+                f"-o/--overwrite to replace it"
+            )
+        self._r.run_vmrun(*auth, "CopyFileFromHostToGuest",
+                          self._vmx, host_path, guest_path)
+        return {"success": True}
 
     def copy_from(self, guest_path: str, host_path: str, overwrite: bool = False) -> dict:
+        # cp is single-file; refuse a directory guest source up front, pointing
+        # at `vmctl push`. directoryExistsInGuest answers this directly on the
+        # transport we already use.
+        auth = self._vmrun_auth()
+        if self._r.run_vmrun_test(
+            *auth, "directoryExistsInGuest", self._vmx, guest_path
+        ):
+            raise VMCtlError(
+                f"guest source '{guest_path}' is a directory; 'vmctl cp' copies "
+                f"a single file. For directory trees use 'vmctl push'."
+            )
         # host_path is the destination; resolve directory-intent forms to a
         # full file path (cp/scp semantics).
         host_path = _resolve_dest(host_path, guest_path)
-        args = ["Guest", "copyFrom"] + self._cred_args()
-        if overwrite:
-            args.append("--overwrite")
-        args += [guest_path, host_path]
-        try:
-            return self._r.run_vmcli_action(self._vmx, *args)
-        except VMCtlError as e:
-            # For copyFrom the "not a file" object is the guest SOURCE, not the
-            # host dest -- vmcli reports a directory source this way.
-            if "not a file" in str(e).lower():
-                raise VMCtlError(
-                    f"guest source '{guest_path}' is a directory; "
-                    f"copy_from copies a single file, not a directory"
-                ) from e
-            raise
+        # vmrun's copy verbs always overwrite; enforce -o ourselves.
+        if not overwrite and os.path.exists(host_path):
+            raise VMCtlError(
+                f"host destination '{host_path}' already exists; pass "
+                f"-o/--overwrite to replace it"
+            )
+        self._r.run_vmrun(*auth, "CopyFileFromGuestToHost",
+                          self._vmx, guest_path, host_path)
+        return {"success": True}
