@@ -106,11 +106,12 @@ vmctl snapshot commit myvm clean --disk-only          # fast no-RAM while runnin
 vmctl snapshot reset myvm clean          # discard state, jump back to the snapshot
 vmctl snapshot rm myvm clean -c          # -c deletes children
 
-# exec: headless by default; no stdout capture (vmcli only launches)
-vmctl exec myvm ipconfig /all            # headless: name the program + its args
+# exec: bare program is fire-and-forget (launch only); -t/-it capture output
+vmctl exec myvm ipconfig /all            # fire-and-forget: name the program + args
 vmctl exec -t myvm 'gci | sort Length | select -last 1'  # -t runs through the
                                            # guest shell: PowerShell on Windows
-                                           # (native pipes/cmdlets), sh on Linux
+                                           # (native pipes/cmdlets), sh on Linux;
+                                           # blocks, prints output, propagates exit
 vmctl exec myvm cmd.exe '/c "dir C:\\ & echo done"'  # mode B escape hatch for
                                            # cmd idioms: name cmd.exe explicitly
 vmctl exec -i myvm "C:\\Windows\\System32\\notepad.exe"  # -i: interactive desktop
@@ -118,10 +119,11 @@ vmctl exec -i myvm "C:\\Windows\\System32\\notepad.exe"  # -i: interactive deskt
                                            #  search PATH)
 vmctl exec -it myvm notepad              # -it: GUI on the desktop, PATH-resolved
 
-# cp (vm:path syntax): direction inferred from the vm: side
-vmctl cp ./local.txt myvm:C:\\local.txt   # host -> guest
+# cp (vm:path syntax): single-file, any size; direction inferred from the vm: side
+vmctl cp ./big.msi myvm:C:\\big.msi       # host -> guest
 vmctl cp myvm:C:\\out.txt ./out.txt       # guest -> host
 vmctl cp ./local.txt :C:\\local.txt       # leading `:` auto-selects the running VM
+vmctl cp -o ./local.txt myvm:C:\\local.txt  # -o overwrites an existing dest
 
 # Inspect (folds in the old `power state` + `parse-vmx`)
 vmctl inspect myvm
@@ -160,11 +162,12 @@ follow (`vmctl snapshot commit -- clean -m msg`).
 `-H`/`--hard`, …) — per-command mnemonics, so the authority is each command's
 `--help`, not a global letter map. `exec` combines `-i`/`-t` as `-it`.
 
-**Two file-into-guest paths — don't confuse them.** `cp` uses VMware Tools,
-takes a **file** destination, and is capped at ~60 KB; `push` uses SSH/SFTP,
-takes a **directory** destination, and has no size limit but needs an OpenSSH
-server in the guest. Use `cp` for tiny files when only Tools is available; use
-`push` for everything larger or when syncing a tree.
+**Two file-into-guest paths — don't confuse them.** `cp` uses VMware Tools
+(vmrun VIX backend, ADR-0010), copies a **single file** of any size, and refuses
+a directory source; `push` uses SSH/SFTP, takes a **directory** destination, and
+copies whole trees but needs an OpenSSH server in the guest. Use `cp` for single
+files when only Tools is available; use `push` for directories or when syncing a
+tree.
 
 ## Library usage
 
@@ -195,26 +198,39 @@ Each `VM` exposes the same subsystems as the CLI groups: `power`, `snapshot`,
   while the VM is online, so `reset` hard-stops, reverts, then restarts (always
   ending running). The snapshot name is validated first, so a typo never powers
   the VM off.
+- **Clipboard targets the interactive desktop (ADR-0008).** `clipboard
+  push`/`pull` run `--interactive` so they touch the clipboard the logged-in
+  guest user actually sees (a non-interactive `Guest run` gets its own phantom
+  clipboard). Both halves first gate on an interactive session existing —
+  `Tools Query` must report `running` **and** `copyPasteGuestVersion > 0` — so a
+  VM cold-booted to the login screen fails loud instead of writing to a clipboard
+  nobody sees. Verified on Windows; the Linux (`xclip`) path is best-effort and
+  unverified.
 - **Shared folders** are written directly to the `.vmx` via `ConfigParams`
   because `vmcli HGFS Set*` commands are non-functional. Share labels are
   `sharedFolder0`, `sharedFolder1`, … and assigned automatically on `add`.
-- **`exec` captures no output and launches only.** `vmcli Guest run` cannot
-  return the guest program's stdout and accepts the program plus at most one
-  argument token. Two modes, selected by `-t`: without `-t` (mode B) you name an
-  explicit program and its arguments — vmctl re-quotes any token with spaces and
-  collapses them into the single token vmcli allows, forwarding them faithfully
-  (`vmctl exec myvm ipconfig /all`, or `cmd.exe /c "…"` written out for cmd
-  idioms). With `-t` (mode A) vmctl wraps the whole command line in the guest
-  shell — **PowerShell** on Windows (passed via `-EncodedCommand` so pipes,
-  inner quotes, and metacharacters survive the relay), `/bin/sh -c` on Linux —
-  so PATH, builtins, and pipes work. `-t`/`-i` detach so the call returns at
-  launch.
+- **`exec` output depends on the mode (ADR-0009).** Two modes, selected by `-t`.
+  Without `-t` (mode B) you name an explicit program and its arguments —
+  fire-and-forget: `vmcli Guest run --noWait` launches it, no stdout is captured,
+  and the CLI prints `launched on <vm>`. vmcli accepts the program plus at most
+  one argument token, so vmctl re-quotes any token with spaces and collapses them
+  into that single token, forwarding them faithfully (`vmctl exec myvm ipconfig
+  /all`, or `cmd.exe /c "…"` written out for cmd idioms). With `-t`/`-it` (mode A)
+  vmctl wraps the whole command line in the guest shell — **PowerShell** on
+  Windows (passed via `-EncodedCommand` so pipes, inner quotes, and metacharacters
+  survive the relay), `/bin/sh -c` on Linux — runs it **to completion** via
+  `vmrun runProgramInGuest` (vmcli's `Guest run` never blocks), captures the
+  merged output to a guest temp file, copies it back, prints it verbatim to
+  stdout, and propagates the guest exit code. Plain `-i` (no `-t`) stays
+  fire-and-forget.
 - **GUI programs need `exec -i` (or `-it`).** Without `-i` the program runs in
   the non-interactive Session 0, so any window it opens is invisible (the CLI
   still prints `launched on <vm>` because the process launched). `-i` places it
   on the interactive desktop but does **not** search the guest `PATH`, so the
   program must be an **absolute path**; `-it` adds the shell wrap so a bare name
   (`vmctl exec -it notepad`) resolves via PATH and the window still appears.
+  Because `-it` waits for completion, a GUI program launched that way blocks the
+  CLI until its window is closed.
 
 ## Development
 
